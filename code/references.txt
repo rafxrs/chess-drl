@@ -1,0 +1,3 @@
+https://python-chess.readthedocs.io/en/latest/
+https://github.com/zjeffer/chess-deep-rl
+
