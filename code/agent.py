@@ -46,6 +46,11 @@ class Agent:
         """Run n MCTS simulations from the current state."""
         if self.model is None:
             self.build_model()
+            
+        # Ensure device synchronization before starting simulations
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()
+            
         self.mcts.run_simulation(self.model, n)
 
     def save_model(self, timestamped: bool = False):
@@ -214,8 +219,11 @@ class Agent:
         # Convert to PyTorch tensor
         tensor = torch.from_numpy(planes).float()
         
+        # Move tensor to the correct device
+        tensor = tensor.to(self.device)
+        
         # Add batch dimension if needed
         if add_batch:
             tensor = tensor.unsqueeze(0)
-            
+                
         return tensor

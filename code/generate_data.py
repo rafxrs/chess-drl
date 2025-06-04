@@ -17,91 +17,94 @@ logging.basicConfig(level=logging.INFO, format=" %(message)s")
 
 def generate_game(model_path, game_id, device=None):
     """Generate a self-play game for multiprocessing."""
-    # Pass device to Agent
-    agent = Agent(model_path=model_path, device=device)
-    board = chess.Board()
-    states, policies, values = [], [], []
-    move_count = 0
-    if device and device.type == 'cuda':
-        # Limit GPU memory usage per process
-        torch.cuda.set_per_process_memory_fraction(0.1)  # Use only 10% of memory per process
+    try:
+        # Force device to CPU for multiprocessing safety
+        device = torch.device("cpu")  # This is safest for multiprocessing
+        
+        # Pass device to Agent
+        agent = Agent(model_path=model_path, device=device)
+        board = chess.Board()
+        states, policies, values = [], [], []
+        move_count = 0
+        
+        print(f"Game {game_id} starting")
     
-    print(f"Game {game_id} starting")
-    
-    while not board.is_game_over() and move_count < config.MAX_GAME_MOVES:
-        if move_count % 5 == 0:  # Log every 5 moves
-            print(f"Game {game_id}: Move {move_count}")
-        agent.state = board.fen()
-        try:
-            # Time the simulation step
-            sim_start = time.time()
-            agent.run_simulations(config.SIMULATIONS_PER_MOVE)
-            sim_time = time.time() - sim_start
-            if sim_time > 10:  # Log if simulations take too long
-                print(f"Game {game_id}: Simulations took {sim_time:.1f}s")
-            
-            # Get move probabilities from MCTS
-            actions, probs = agent.mcts.get_move_probs()
-            
-            # Filter only legal moves
-            legal_actions = []
-            legal_probs = []
-            for action, prob in zip(actions, probs):
-                if action in board.legal_moves:
-                    legal_actions.append(action)
-                    legal_probs.append(prob)
-            
-            # Renormalize probabilities if needed
-            if legal_actions and sum(legal_probs) > 0:
-                legal_probs = np.array(legal_probs) / sum(legal_probs)
-                # Sample a move proportionally to the probabilities
-                move = np.random.choice(legal_actions, p=legal_probs)
-            else:
-                # Fallback to a random legal move if no legal moves in the MCTS results
-                print(f"Game {game_id}: No legal moves from MCTS, using random move")
-                move = np.random.choice(list(board.legal_moves))
-            
-            # Store state and policy
-            states.append(board.copy())
-            
-            # Create policy vector (one-hot at the selected move indices)
-            policy = np.zeros(config.OUTPUT_SHAPE[0], dtype=np.float32)
-            for i, a in enumerate(actions):
-                idx = move_to_index(a)
-                if idx < len(policy):  # Safety check
-                    policy[idx] = probs[i]
-            
-            policies.append(policy)
-            
-            # Make the move
-            board.push(move)
-            move_count += 1
-            
-        except Exception as e:
-            print(f"Game {game_id} error: {e}")
-            # Save the board state for debugging
-            with open(f"error_board_game_{game_id}.fen", "w") as f:
-                f.write(board.fen())
-            break
-    
-    # Game is over, assign values
-    result = board.result()
-    print(f"Game {game_id} finished after {move_count} moves. Result: {result}")
-    
-    # Calculate game outcome
-    if result == '1-0':  # White win
-        z = 1.0
-    elif result == '0-1':  # Black win
-        z = -1.0
-    else:  # Draw
-        z = 0.0
-    
-    # Set value for each state (alternating perspectives)
-    values = []
-    for i in range(len(states)):
-        # Flip the perspective for black's moves
-        values.append(z if i % 2 == 0 else -z)
-    
+        while not board.is_game_over() and move_count < config.MAX_GAME_MOVES:
+            if move_count % 5 == 0:  # Log every 5 moves
+                print(f"Game {game_id}: Move {move_count}")
+            agent.state = board.fen()
+            try:
+                # Time the simulation step
+                sim_start = time.time()
+                agent.run_simulations(config.SIMULATIONS_PER_MOVE)
+                sim_time = time.time() - sim_start
+                if sim_time > 10:  # Log if simulations take too long
+                    print(f"Game {game_id}: Simulations took {sim_time:.1f}s")
+                
+                # Get move probabilities from MCTS
+                actions, probs = agent.mcts.get_move_probs()
+                
+                # Filter only legal moves
+                legal_actions = []
+                legal_probs = []
+                for action, prob in zip(actions, probs):
+                    if action in board.legal_moves:
+                        legal_actions.append(action)
+                        legal_probs.append(prob)
+                
+                # Renormalize probabilities if needed
+                if legal_actions and sum(legal_probs) > 0:
+                    legal_probs = np.array(legal_probs) / sum(legal_probs)
+                    # Sample a move proportionally to the probabilities
+                    move = np.random.choice(legal_actions, p=legal_probs)
+                else:
+                    # Fallback to a random legal move if no legal moves in the MCTS results
+                    print(f"Game {game_id}: No legal moves from MCTS, using random move")
+                    move = np.random.choice(list(board.legal_moves))
+                
+                # Store state and policy
+                states.append(board.copy())
+                
+                # Create policy vector (one-hot at the selected move indices)
+                policy = np.zeros(config.OUTPUT_SHAPE[0], dtype=np.float32)
+                for i, a in enumerate(actions):
+                    idx = move_to_index(a)
+                    if idx < len(policy):  # Safety check
+                        policy[idx] = probs[i]
+                
+                policies.append(policy)
+                
+                # Make the move
+                board.push(move)
+                move_count += 1
+                
+            except Exception as e:
+                print(f"Game {game_id} error: {e}")
+                # Save the board state for debugging
+                with open(f"error_board_game_{game_id}.fen", "w") as f:
+                    f.write(board.fen())
+                break
+        
+        # Game is over, assign values
+        result = board.result()
+        print(f"Game {game_id} finished after {move_count} moves. Result: {result}")
+        
+        # Calculate game outcome
+        if result == '1-0':  # White win
+            z = 1.0
+        elif result == '0-1':  # Black win
+            z = -1.0
+        else:  # Draw
+            z = 0.0
+        
+        # Set value for each state (alternating perspectives)
+        values = []
+        for i in range(len(states)):
+            # Flip the perspective for black's moves
+            values.append(z if i % 2 == 0 else -z)
+    except Exception as e:
+        print(f"Game {game_id} failed: {e}")
+        return [], [], []
     return states, policies, values
 
 def run_game(game_id_and_path):
