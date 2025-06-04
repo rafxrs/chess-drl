@@ -1,4 +1,5 @@
-Complete Guide to Running Your Chess DRL Pipeline
+# Chess Deep-RL Training Pipeline
+
 ### First Time Setup
 1. Create directories for models, memory, and plots:
 ```

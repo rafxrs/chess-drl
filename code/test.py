@@ -16,7 +16,7 @@ from agent import Agent
 from env import Chess_Env
 from mcts import MCTS
 from modelbuilder import RLModelBuilder
-from train import move_to_index, batchify, generate_selfplay_data, generate_game
+from train import move_to_index, batchify, generate_game
 
 
 # Set up logging
