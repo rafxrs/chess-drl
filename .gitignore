@@ -1,0 +1,57 @@
+# Generated training data
+/memory/*.npz
+/memory/*.npy
+
+# Model files
+/models/*.pt
+/models/*.pth
+/models/*.h5
+/models/*.pkl
+/models/temp_*
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Logs and training outputs
+/plots/*.png
+*.log
+*.fen
+error_board_game_*.fen
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Test outputs
+htmlcov/
+.coverage
+.pytest_cache/
+
+# Large data files
+*.csv
+*.xlsx
+*.zip
+*.tar.gz
+
+# Temporary files
+temp_*
+*~
