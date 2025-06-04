@@ -15,13 +15,10 @@ from modelbuilder import RLModelBuilder
 
 logging.basicConfig(level=logging.INFO, format=" %(message)s")
 
-def generate_game(model_path, game_id):
+def generate_game(model_path, game_id, device=None):
     """Generate a self-play game for multiprocessing."""
-    import chess
-    import torch
-    from agent import Agent
-    
-    agent = Agent(model_path=model_path)
+    # Pass device to Agent
+    agent = Agent(model_path=model_path, device=device)
     board = chess.Board()
     states, policies, values = [], [], []
     move_count = 0
@@ -104,7 +101,7 @@ def generate_game(model_path, game_id):
     
     return states, policies, values
 
-def generate_selfplay_data_parallel(model_path, n_games=10, output_path=None):
+def generate_selfplay_data_parallel(model_path, n_games=10, output_path=None, device=None):
     """
     Generate self-play data using multiple processes.
     
@@ -112,6 +109,7 @@ def generate_selfplay_data_parallel(model_path, n_games=10, output_path=None):
         model_path: Path to the model to use for self-play
         n_games: Number of games to generate
         output_path: Path to save the generated data (optional)
+        device: Device to run model inference on (cuda/cpu)
         
     Returns:
         tuple: (states, policies, values) if output_path is None,
@@ -121,7 +119,10 @@ def generate_selfplay_data_parallel(model_path, n_games=10, output_path=None):
     mp_context = torch_mp.get_context('spawn')
     num_processes = min(config.NUM_WORKERS, n_games)
     
-    logging.info(f"Generating {n_games} self-play games using {num_processes} processes")
+    if device and device.type == 'cuda':
+        logging.info(f"Using GPU ({torch.cuda.get_device_name(0)}) for model initialization")
+    else:
+        logging.info(f"Using CPU for model initialization")
     
     # This avoids sharing the model directly which can cause issues
     temp_model_path = os.path.join(config.MODEL_FOLDER, f"temp_model_{int(time.time())}.pt")
@@ -130,19 +131,26 @@ def generate_selfplay_data_parallel(model_path, n_games=10, output_path=None):
         model = RLModelBuilder(
             config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]
         ).build_model(model_path)
+        
+        # If using GPU, we load the model to GPU first
+        if device and device.type == 'cuda':
+            model.to(device)
+        
         torch.save(model.state_dict(), temp_model_path)
     
     try:
+        # Create a partial function that includes the device
+        game_fn = partial(generate_game, temp_model_path, device=device)
+        
         # Use Pool for parallel processing
         with mp_context.Pool(num_processes) as pool:
-            game_fn = partial(generate_game, temp_model_path)
-            
             # Track progress with tqdm if available
             try:
                 from tqdm import tqdm
-                results = list(tqdm(pool.imap(game_fn, range(n_games)), total=n_games, desc="Self-play games"))
+                results = list(tqdm(pool.imap(lambda x: game_fn(game_id=x), range(n_games)), 
+                                    total=n_games, desc="Self-play games"))
             except ImportError:
-                results = pool.map(game_fn, range(n_games))
+                results = pool.map(lambda x: game_fn(game_id=x), range(n_games))
         
         # Collect results
         all_states, all_policies, all_values = [], [], []
@@ -223,6 +231,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate self-play data for chess DRL")
     parser.add_argument("--model", type=str, default=os.path.join(config.MODEL_FOLDER, "initial_model.pt"),
                       help="Path to model for data generation")
+    parser.add_argument("--gpu", action="store_true", help="Use GPU for data generation")
     parser.add_argument("--games", "-g", type=int, default=config.N_SELFPLAY_GAMES, 
                       help="Number of self-play games to generate")
     parser.add_argument("--output", "-o", type=str, default="./memory/selfplay_data.npz",
@@ -232,6 +241,13 @@ def main():
     parser.add_argument("--visualize", "-v", action="store_true",
                       help="Visualize a self-play game after generation")
     args = parser.parse_args()
+
+    if args.gpu and torch.cuda.is_available():
+        device = torch.device("cuda")
+        logging.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        device = torch.device("cpu")
+        logging.info("Using CPU for data generation")
     
     # Set up paths
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
@@ -240,7 +256,7 @@ def main():
     # Generate data
     logging.info(f"Generating {args.games} self-play games using model {args.model}")
     
-    generate_selfplay_data_parallel(args.model, args.games, args.output)
+    generate_selfplay_data_parallel(args.model, args.games, args.output, device)
     
     # Visualize a game if requested
     if args.visualize:

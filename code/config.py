@@ -64,4 +64,4 @@ MEMORY_DIR = os.environ.get("MEMORY_FOLDER", "./memory")
 MAX_REPLAY_MEMORY = 1000000
 # ============= GPU & MULTIPROCESSING =============
 USE_GPU = True
-NUM_WORKERS = 8  # Or mp.cpu_count()
+NUM_WORKERS = 5 # Or mp.cpu_count()

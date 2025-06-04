@@ -18,18 +18,21 @@ python code/generate_data.py --model models/initial_model.pt --games 50 --output
 ```
 Adjust --games based on your CPU and time constraints
 This step is CPU-intensive and can run for hours with many games
+
 Step 2: Train the Model
 ```
 python code/train.py --model models/initial_model.pt --data memory/selfplay_data.npz --epochs 10
 ```
 This will train for 10 epochs on the generated data
 Add --visualize to see games during training
+
 Step 3: Evaluate the Model
 ```
 python code/evaluate.py --model1 models/initial_model.pt --model2 models/model_epoch_10.pt --games 20
 ```
 This compares the new model against the initial model
 Use --games to control how many games to play for evaluation
+
 Step 4: Visualize Gameplay
 ```
 python code/selfplay.py --model_path models/model_epoch_10.pt --n_games 1
@@ -47,46 +50,20 @@ python code/train.py --model models/model_epoch_10.pt --data memory/selfplay_dat
 ```
 
 ### Google Colab Workflow
-For Colab, you'll want to generate data locally and then train on Colab's GPU:
+For Colab, we want to generate data and then train on Colab's GPU:
 
-Step 1: Local Data Generation
-```
-# Generate lots of training data locally
-python code/generate_data.py --model models/initial_model.pt --games 100 --output memory/colab_data.npz
-```
-Step 2: Set Up Colab
+Step 1: Set Up Colab
 ```
 # Mount Google Drive to save models between sessions (optional)
 from google.colab import drive
 drive.mount('/content/drive')
 
-# Create directories
-!mkdir -p models memory plots
-
-# Clone repository (if on GitHub) or upload files
-# Option 1: Clone from GitHub
-# !git clone https://github.com/your-username/chess-drl.git
+# Clone from GitHub
+# !git clone https://<USERNAME>:<TOKEN>@github.com/<USERNAME>/<REPO_NAME>.git
 # %cd chess-drl
 
-# Option 2: Upload files
-from google.colab import files
-
-# Upload code files
-uploaded = files.upload()  # Upload Python files
-!mkdir -p code
-!mv *.py code/
-
-# Upload model and data
-uploaded = files.upload()  # Upload models/initial_model.pt
-!mkdir -p models
-!mv *.pt models/
-
-uploaded = files.upload()  # Upload memory/colab_data.npz
-!mkdir -p memory
-!mv *.npz memory/
-
 # Install dependencies
-!pip install python-chess tqdm matplotlib
+!pip install -r "code/requirements.txt"
 
 # Check GPU
 import torch
@@ -94,7 +71,12 @@ print(f"CUDA available: {torch.cuda.is_available()}")
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
 ```
-Step 3: Train on Colab
+Step 2: Data Generation
+```
+# Generate lots of training data using the gpu
+python code/generate_data.py --model models/model_latest.pt --games 100 --output memory/selfplay_data.npz --gpu
+```
+Step 3: Training
 ```
 # Run training
 !python code/train.py --model models/initial_model.pt --data memory/colab_data.npz --epochs 20
@@ -136,3 +118,30 @@ Then repeat the Colab training.
 - Track ELO differences over time
 
 This workflow separates the CPU-intensive data generation from the GPU-accelerated training, making optimal use of your resources.
+
+### GPU-Accelerated Data Generation
+
+To speed up data generation using a GPU:
+
+```
+python code/generate_data.py --model models/model_latest.pt --games 100 --output memory/selfplay_data.npz --gpu
+```
+For best performance:
+
+- Make sure your model architecture is optimized for GPU inference
+- Use appropriate batch sizes for your GPU memory
+- Consider using mixed-precision inference for even faster generation
+
+## Performance Comparison
+
+On a decent GPU (like an RTX 3080), you can expect:
+
+- **CPU-only**: ~10-50 positions per second
+- **GPU-accelerated**: ~500-2000+ positions per second
+
+The speedup will be most noticeable when:
+1. Running many MCTS simulations per move
+2. Using a larger neural network model
+3. Generating many games in parallel
+
+The CPU will still handle the game logic and MCTS tree operations, but the most computationally intensive part (neural network inference) will run on the GPU, resulting in a significant overall speedup.

@@ -11,31 +11,45 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Agent:
-    def __init__(self, model_path=None, state=chess.STARTING_FEN):
+    def __init__(self, model_path=None, state=chess.STARTING_FEN, device=None):
+        """
+        Initialize the agent with a model and state.
+        
+        Args:
+            model_path: Path to the model weights
+            state: Initial chess state as FEN string
+            device: Device to run inference on (cuda/cpu)
+        """
         self.model_path = model_path
         self.state = state
+        self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() and config.USE_GPU else "cpu")
+        logging.debug(f"Agent initialized on device: {self.device}")
+        
         self.mcts = MCTS(self, config.__dict__)
         self.model = None
 
         if model_path is None:
             raise ValueError("Specify the path to the model to use.")
-        self.model = RLModelBuilder(
-            config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]
-        ).build_model(model_path)
-        logging.info(f"Using local model from {model_path}")
+        self.build_model()
 
     def build_model(self):
+        """Build and load the model."""
         if self.model is None:
             self.model = RLModelBuilder(
                 config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]
             ).build_model(self.model_path)
-            logging.info(f"Model built from {self.model_path}")
+            self.model.to(self.device)
+            self.model.eval()  # Set model to evaluation mode for inference
+            logging.info(f"Model built from {self.model_path} on {self.device}")
 
     def run_simulations(self, n: int = 1):
-        self.build_model()
+        """Run n MCTS simulations from the current state."""
+        if self.model is None:
+            self.build_model()
         self.mcts.run_simulation(self.model, n)
 
     def save_model(self, timestamped: bool = False):
+        """Save the model to disk."""
         if self.model is None:
             raise ValueError("Model is not built yet. Call build_model() first.")
         if timestamped:
@@ -48,34 +62,91 @@ class Agent:
         return model_path
     
     def get_move(self, env):
+        """
+        Get the best move for the current state using MCTS.
+        
+        Args:
+            env: Chess environment with a 'board' attribute
+            
+        Returns:
+            chess.Move: The selected move
+        """
         self.state = env.board.fen()
         self.run_simulations(config.SIMULATIONS_PER_MOVE)
         actions, probs = self.mcts.get_move_probs()
         move = np.random.choice(actions, p=probs)
         return move
 
-    def predict(self, data):
+    def predict(self, state_tensor):
+        """
+        Run model prediction on state tensor.
+        
+        Args:
+            state_tensor: Preprocessed state as tensor
+            
+        Returns:
+            tuple: (policy logits, value)
+        """
         if self.model is None:
-            raise ValueError("Model is not built yet. Call build_model() first.")
-        self.model.eval()
+            self.build_model()
+            
+        self.model.eval()  # Set model to evaluation mode
+        
+        # Move tensor to correct device if not already there
+        if isinstance(state_tensor, np.ndarray):
+            state_tensor = torch.from_numpy(state_tensor).float()
+            
+        if state_tensor.device != self.device:
+            state_tensor = state_tensor.to(self.device)
+            
         with torch.no_grad():
-            data_tensor = torch.from_numpy(data).float()
-            policy, value = self.model(data_tensor)
+            policy, value = self.model(state_tensor)
+        
+        return policy, value
+    
+    def predict_batch(self, states_batch):
+        """
+        Run model prediction on a batch of states.
+        
+        Args:
+            states_batch: List of states or batch tensor
+            
+        Returns:
+            tuple: (policy logits tensor, value tensor)
+        """
+        if self.model is None:
+            self.build_model()
+            
+        self.model.eval()
+        
+        # Handle list of states vs. preprocessed tensor
+        if isinstance(states_batch, list):
+            # Convert list of states to tensor batch
+            tensors = [self.state_to_tensor(s, add_batch=False) for s in states_batch]
+            state_tensor = torch.cat(tensors, dim=0).to(self.device)
+        else:
+            # Already a tensor, just move to device
+            state_tensor = states_batch.to(self.device)
+        
+        with torch.no_grad():
+            policy, value = self.model(state_tensor)
+            
+        # Optional: clear CUDA cache on large batches
+        if state_tensor.size(0) > 64 and self.device.type == 'cuda':
+            torch.cuda.empty_cache()
+            
         return policy, value
 
-    def state_to_tensor(self, state):
+    def state_to_tensor(self, state, add_batch=True):
         """
         Convert a chess.Board to a tensor for the neural network.
         
-        Input planes (19 planes total):
-        - 6 planes for each piece type for the current player (6)
-        - 6 planes for each piece type for the opponent (6)
-        - 1 plane for en passant square (1)
-        - 1 plane for side to move (1)
-        - 4 planes for castling rights (4)
-        - 1 plane for move count - used for 50-move rule (1)
-        
-        Each plane is an 8x8 matrix.
+        Args:
+            state: chess.Board or FEN string
+            add_batch: Whether to add a batch dimension
+            
+        Returns:
+            torch.Tensor: Input tensor for the model
         """
         if isinstance(state, str):
             state = chess.Board(state)
@@ -141,8 +212,10 @@ class Agent:
         planes[plane_idx].fill(min(1.0, state.halfmove_clock / 100.0))
         
         # Convert to PyTorch tensor
-        # The expected input shape is (channels, height, width)
         tensor = torch.from_numpy(planes).float()
-        if self.model is not None and next(self.model.parameters()).is_cuda:
-            return tensor.cuda().unsqueeze(0)
-        return tensor.unsqueeze(0)
+        
+        # Add batch dimension if needed
+        if add_batch:
+            tensor = tensor.unsqueeze(0)
+            
+        return tensor
