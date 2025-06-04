@@ -22,6 +22,9 @@ def generate_game(model_path, game_id, device=None):
     board = chess.Board()
     states, policies, values = [], [], []
     move_count = 0
+    if device and device.type == 'cuda':
+        # Limit GPU memory usage per process
+        torch.cuda.set_per_process_memory_fraction(0.1)  # Use only 10% of memory per process
     
     print(f"Game {game_id} starting")
     
@@ -101,6 +104,11 @@ def generate_game(model_path, game_id, device=None):
     
     return states, policies, values
 
+def run_game(game_id_and_path):
+    """Wrapper function for multiprocessing that can be pickled correctly."""
+    game_id, model_path, device = game_id_and_path
+    return generate_game(model_path, game_id, device)
+
 def generate_selfplay_data_parallel(model_path, n_games=10, output_path=None, device=None):
     """
     Generate self-play data using multiple processes.
@@ -132,25 +140,22 @@ def generate_selfplay_data_parallel(model_path, n_games=10, output_path=None, de
             config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]
         ).build_model(model_path)
         
-        # If using GPU, we load the model to GPU first
-        if device and device.type == 'cuda':
-            model.to(device)
-        
         torch.save(model.state_dict(), temp_model_path)
     
     try:
-        # Create a partial function that includes the device
-        game_fn = partial(generate_game, temp_model_path, device=device)
+        # IMPORTANT CHANGE: Use a list of tuples instead of lambda
+        game_args = [(i, temp_model_path, device) for i in range(n_games)]
         
         # Use Pool for parallel processing
         with mp_context.Pool(num_processes) as pool:
-            # Track progress with tqdm if available
+            # Track progress with tqdm
             try:
                 from tqdm import tqdm
-                results = list(tqdm(pool.imap(lambda x: game_fn(game_id=x), range(n_games)), 
-                                    total=n_games, desc="Self-play games"))
+                # IMPORTANT CHANGE: Pass the run_game function directly
+                results = list(tqdm(pool.imap(run_game, game_args), 
+                                   total=n_games, desc="Self-play games"))
             except ImportError:
-                results = pool.map(lambda x: game_fn(game_id=x), range(n_games))
+                results = pool.map(run_game, game_args)
         
         # Collect results
         all_states, all_policies, all_values = [], [], []

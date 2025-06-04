@@ -18,62 +18,30 @@ This project implements a chess AI that learns to play chess through self-play w
 - **Interactive Play**: Play against the trained model with a visual interface
 - **Comprehensive Testing**: Test suite to validate components and monitor performance
 
-## Requirements
-**Core dependencies**
-```
-chess==1.9.4
-numpy==1.24.3
-torch==2.0.1
-python-dotenv==1.0.0
-tqdm==4.65.0
-```
-
-**Visualization and UI**
-```
-pygame==2.5.0
-pygame-popup==0.9.1
-```
-**Utilities**
-```
-setproctitle==1.3.2
-matplotlib==3.7.1
-```
-**Performance monitoring**
-```
-tensorboard==2.13.0
-psutil==5.9.5
-```
-**Development tools**
-```
-pytest==7.3.1
-black==23.3.0
-pylint==2.17.4
-pynvml==12.0.0
-```
 ## Project Structure
 ```
 code/
 ├── agent.py              # Agent implementation with MCTS
 ├── config.py             # Configuration and hyperparameters
+├── edge.py               # Edge representation in search tree
 ├── env.py                # Chess environment wrapper
 ├── evaluate.py           # Model evaluation tools
 ├── game.py               # Game simulation utilities
-├── initmodel.py          # Model initialization
-├── main.py               # Main entry point
+├── generate_data.py      # Self-play data generation
+├── guide.md              # Step-by-step tutorial
+├── mcts.py               # Main MCTS algorithm
 ├── modelbuilder.py       # Neural network architecture
-├── selfplay.py           # Model plays n games against itself
+├── node.py               # Node representation in search tree
+├── selfplay.py           # Visualize model playing chess
 ├── test.py               # Test suite
 ├── train.py              # Training pipeline
 ├── utils.py              # Utility functions
-├── gui/                  # GUI components for visualization
-│   ├── board.py          # Chess board visualization
-│   ├── display.py        # Display management
-│   ├── pieces.py         # Chess piece rendering
-│   └── imgs/             # Images for chess pieces
-└── mcts/                 # Monte Carlo Tree Search implementation
-    ├── edge.py           # Edge representation in search tree
-    ├── mcts.py           # Main MCTS algorithm
-    └── node.py           # Node representation in search tree
+├── chess-drl.ipynb       # Colab notebook for cloud training
+└── gui/                  # GUI components for visualization
+    ├── board.py          # Chess board visualization
+    ├── display.py        # Display management
+    ├── pieces.py         # Chess piece rendering
+    └── imgs/             # Images for chess pieces
 ```
 ## How to Use
 ### Installation
@@ -86,48 +54,8 @@ cd chess-drl
 ```
 pip install -r code/requirements.txt
 ```
-3. Set up environment variables (optional):
-```
-# Create a .env file to customize parameters
-echo "SIMULATIONS_PER_MOVE=800" > .env
-```
-### Training
-1. Initialize a new model:
-```
-python code/initmodel.py
-```
-2. Start training:
-```
-python code/train.py
-```
 
-Training parameters can be modified in `config.py` or overridden with environment variables.
-
-### Testing
-Run the comprehensive test suite to validate your setup:
-
-`python code/test.py`
-
-This will:
-
-- Test all components of the system
-- Generate performance metrics
-- Create visualizations of resource usage
-- Produce an HTML report with recommendations
-
-### Playing Against the Model
-Play against the trained model with a visual interface:
-
-```python code/play.py --model models/model_final.pt```
-
-**Evaluation**
-
-Evaluate model performance:
-`
-python code/evaluate.py --model models/model_final.pt --games 100
-`
-
-**Training Process**
+## Training Process 
 
 The training process follows these steps:
 
@@ -153,6 +81,170 @@ Key hyperparameters in `config.py`:
 - N_SELFPLAY_GAMES: Number of self-play games per training iteration (default: 10)
 - NUM_WORKERS: Number of parallel processes for self-play (default: CPU count)
 - USE_GPU: Whether to use GPU acceleration (default: True)
+
+# Training Pipeline
+
+## Testing
+Run the comprehensive test suite to validate the setup:
+
+`python code/test.py`
+
+This will:
+
+- Test all components of the system
+- Generate performance metrics
+- Create visualizations of resource usage
+- Produce an HTML report with recommendations
+
+### Local Training Workflow
+Step 1: Generate Self-Play Data
+```
+python code/generate_data.py --model models/initial_model.pt --games 50 --output memory/selfplay_data.npz
+```
+Adjust --games based on your CPU and time constraints.
+This step is CPU-intensive and can run for hours with many games
+
+Step 2: Train the Model
+```
+python code/train.py --model models/initial_model.pt --data memory/selfplay_data.npz --epochs 10
+```
+This will train for 10 epochs on the generated data. 
+Add the --visualize flag to see games during training
+
+Step 3: Evaluate the Model
+```
+python code/evaluate.py --model1 models/initial_model.pt --model2 models/model_epoch_10.pt --games 20
+```
+This compares the new model against the initial model.
+Use --games to control how many games to play for evaluation
+
+Step 4: Visualize Gameplay
+```
+python code/selfplay.py --model_path models/model_epoch_10.pt --n_games 1
+```
+This will visualize a game played by the trained model
+
+### Iterative Improvement
+After the initial training cycle, we can generate more data with the improved model:
+```
+# Generate more data with improved model
+python code/generate_data.py --model models/model_epoch_10.pt --games 50 --output memory/selfplay_data_2.npz
+
+# Train further using the new data
+python code/train.py --model models/model_epoch_10.pt --data memory/selfplay_data_2.npz --epochs 10
+```
+
+### Google Colab Workflow
+For Colab, we want to generate data and then train on Colab's GPU.
+There is also a notebook containing the workflow below in the repository. 
+
+Step 1: Set Up Colab
+```
+# Mount Google Drive to save models between sessions (optional)
+from google.colab import drive
+drive.mount('/content/drive')
+
+# Clone from GitHub
+# !git clone https://<USERNAME>:<TOKEN>@github.com/<USERNAME>/<REPO_NAME>.git
+# %cd chess-drl
+
+# Install dependencies
+!pip install -r "code/requirements.txt"
+
+# Check GPU
+import torch
+print(f"CUDA available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+```
+Step 2: Data Generation
+```
+# Generate lots of training data using the gpu
+python code/generate_data.py --model models/model_latest.pt --games 100 --output memory/selfplay_data.npz --gpu
+```
+Step 3: Training
+```
+# Run training
+!python code/train.py --model models/initial_model.pt --data memory/colab_data.npz --epochs 20
+
+# Show the training loss plot
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+from glob import glob
+latest_plot = sorted(glob('plots/*.png'))[-1]
+img = mpimg.imread(latest_plot)
+plt.figure(figsize=(12, 8))
+plt.imshow(img)
+plt.axis('off')
+plt.show()
+
+# Download trained model
+from google.colab import files
+files.download('models/model_final.pt')
+```
+Step 4: Continue Locally
+Once we download the model from Colab, we can generate more data with it locally:
+```
+python code/generate_data.py --model models/model_final.pt --games 100 --output memory/colab_data_2.npz
+```
+Then repeat the Colab training.
+
+### Tips for Efficient Training
+1. For self-play data generation:
+- Use local machine with multiprocessing
+- Leave it running overnight for large datasets
+- Use --append to add to existing data files
+2. For model training:
+- Use Colab's GPU for faster training
+- Try different learning rates in config.py
+- Plot the losses to diagnose training issues
+3. For evaluation:
+- Compare models often to track progress
+- Use at least 20-50 games for statistically significant results
+- Track ELO differences over time
+
+This workflow separates the CPU-intensive data generation from the GPU-accelerated training, making optimal use of your resources.
+
+### GPU-Accelerated Data Generation
+
+To speed up data generation using a GPU:
+
+```
+python code/generate_data.py --model models/model_latest.pt --games 100 --output memory/selfplay_data.npz --gpu
+```
+For best performance:
+
+- Make sure your model architecture is optimized for GPU inference
+- Use appropriate batch sizes for your GPU memory
+- Consider using mixed-precision inference for even faster generation
+
+## Performance Comparison
+
+On a decent GPU (like an RTX 3080), you can expect:
+
+- **CPU-only**: ~10-50 positions per second
+- **GPU-accelerated**: ~500-2000+ positions per second
+
+The speedup will be most noticeable when:
+1. Running many MCTS simulations per move
+2. Using a larger neural network model
+3. Generating many games in parallel
+
+The CPU will still handle the game logic and MCTS tree operations, but the most computationally intensive part (neural network inference) will run on the GPU, resulting in a significant overall speedup.
+
+
+
+### Playing Against the Model
+Play against the trained model with a visual interface:
+
+```python code/play.py --model models/model_final.pt```
+
+**Evaluation**
+
+Evaluate model performance:
+`
+python code/evaluate.py --model models/model_final.pt --games 100
+`
 
 ## Performance Tips
 For optimal performance:
