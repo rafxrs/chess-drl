@@ -6,7 +6,7 @@ import utils
 import numpy as np
 from modelbuilder import RLModelBuilder
 from tqdm import tqdm
-from mcts.mcts import MCTS
+from mcts import MCTS
 from dotenv import load_dotenv
 load_dotenv()
 

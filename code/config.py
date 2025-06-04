@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ============= MCTS =============
-SIMULATIONS_PER_MOVE = int(os.environ.get("SIMULATIONS_PER_MOVE", 400))
+SIMULATIONS_PER_MOVE = int(os.environ.get("SIMULATIONS_PER_MOVE", 200))
 
 # exploration parameters 
 C_base = 20000
@@ -42,6 +42,7 @@ OUTPUT_SHAPE = (8*8*amount_of_planes, 1)
 
 # ============= NEURAL NETWORK PARAMETERS =============
 # change if necessary. AZ started with 0.2 and then dropped three times to 0.02, 0.002 and 0.0002
+WEIGHT_DECAY = 1e-4  # L2 regularization parameter
 LEARNING_RATE = 0.2
 # filters for the convolutional layers (AZ: 256)
 CONVOLUTION_FILTERS = 256
@@ -57,7 +58,7 @@ BATCH_SIZE = 1024 # batch size for training (should be high if using GPU)
 N_EPOCHS = 100 # number of epochs to train the model
 N_SELFPLAY_GAMES = 10 # number of self-play games to generate per training iteration
 LOSS_PLOTS_FOLDER="./plots"
-
+EVALUATION_GAMES = 25  # Number of games to play for evaluation
 # ============= MEMORY CONFIGURATION =============
 MEMORY_DIR = os.environ.get("MEMORY_FOLDER", "./memory")
 MAX_REPLAY_MEMORY = 1000000

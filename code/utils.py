@@ -1,6 +1,8 @@
 import chess
 import numpy as np
 import config
+import functools
+import time
 
 @staticmethod
 def move_to_index(move):
@@ -91,3 +93,22 @@ def move_to_index(move):
     
     # Final index: source square * 73 + move type
     return from_square * config.amount_of_planes + move_type
+
+def time_function(func):
+    """
+    A decorator that prints the execution time of the decorated function.
+    
+    Args:
+        func: The function to decorate
+        
+    Returns:
+        The wrapped function with timing functionality
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        print(f"{func.__name__} executed in {end_time - start_time:.4f} seconds")
+        return result
+    return wrapper

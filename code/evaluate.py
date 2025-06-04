@@ -153,20 +153,20 @@ class Evaluator:
             
         return score, summary
 
-def main():
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Evaluate two chess models against each other")
-    parser.add_argument("model_1", type=str, help="Path to first model")
-    parser.add_argument("model_2", type=str, help="Path to second model")
-    parser.add_argument("--games", "-g", type=int, default=10, help="Number of games to play (per side)")
-    parser.add_argument("--sims", "-s", type=int, default=None, help="Simulations per move (overrides config)")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Evaluate chess models against each other")
+    parser.add_argument("--model1", "--model_1", type=str, required=True, help="Path to first model")
+    parser.add_argument("--model2", "--model_2", type=str, required=True, help="Path to second model")
+    parser.add_argument("--games", "-g", type=int, default=10, help="Number of games to play")
+    parser.add_argument("--simulations", "--sims", "-s", type=int, default=None, 
+                      help="Number of MCTS simulations per move")
     parser.add_argument("--quiet", "-q", action="store_true", help="Suppress progress output")
-    
     args = parser.parse_args()
     
-    # Run evaluation
-    evaluator = Evaluator(args.model_1, args.model_2)
-    evaluator.evaluate(args.games, verbose=not args.quiet, simulations_per_move=args.sims)
-
-if __name__ == "__main__":
-    main()
+    evaluator = Evaluator(args.model1, args.model2)
+    score, summary = evaluator.evaluate(args.games, verbose=not args.quiet, 
+                               simulations_per_move=args.simulations)
+    
+    # Already prints summary if verbose=True
+    if args.quiet:
+        print(summary)

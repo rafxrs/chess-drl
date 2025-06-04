@@ -12,8 +12,8 @@ import chess
 from env import Chess_Env
 from agent import Agent
 from chess.pgn import Game as ChessGame
-from mcts.edge import Edge
-from mcts.mcts import MCTS
+from edge import Edge
+from mcts import MCTS
 
 class Game:
     """

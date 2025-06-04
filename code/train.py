@@ -9,11 +9,13 @@ import multiprocessing as mp
 import time
 import os
 import torch.multiprocessing as torch_mp
+from generate_data import generate_selfplay_data_parallel
 from utils import move_to_index
 from functools import partial
 from collections import deque
 from agent import Agent
 from modelbuilder import RLModelBuilder
+from evaluate import Evaluator
 
 logging.basicConfig(level=logging.INFO, format=" %(message)s")
 
@@ -28,336 +30,509 @@ LEARNING_RATE = config.LEARNING_RATE
 # Replay buffer
 replay_buffer = deque(maxlen=REPLAY_MEMORY_SIZE)
 
-def generate_selfplay_data(agent, n_games=1):
-    """
-    Generate self-play games and store (state, policy, value) in the replay buffer.
-    """
-    import chess
-    for _ in range(n_games):
-        board = chess.Board()
-        states, policies, values = [], [], []
-        agent.state = board.fen()
-        while not board.is_game_over():
-            agent.state = board.fen()
-            agent.run_simulations(N_SIMULATIONS)
-            actions, probs = agent.mcts.get_move_probs()
-            move = np.random.choice(actions, p=probs)
-            # Save state and policy
-            states.append(board.copy())
-            policy = np.zeros(config.OUTPUT_SHAPE[0], dtype=np.float32)
-            for i, a in enumerate(actions):
-                # You must implement move_to_index for your move encoding
-                idx = move_to_index(a)
-                policy[idx] = probs[i]
-            policies.append(policy)
-            board.push(move)
-        # Assign values (from the perspective of the player to move)
-        result = board.result()
-        if result == '1-0':
-            z = 1
-        elif result == '0-1':
-            z = -1
+class Trainer:
+    def __init__(self, model, device):
+        """
+        Initialize the trainer with a model and device.
+        
+        Args:
+            model: PyTorch neural network model
+            device: Device to train on (CPU/GPU)
+        """
+        self.model = model
+        self.device = device
+        self.batch_size = config.BATCH_SIZE
+    
+    def sample_batch(self, replay_buffer):
+        """Sample a random batch from the replay buffer."""
+        if self.batch_size > len(replay_buffer):
+            return list(replay_buffer)
         else:
-            z = 0
-        values = [z if i % 2 == 0 else -z for i in range(len(states))]
-        for s, p, v in zip(states, policies, values):
-            replay_buffer.append((s, p, v))
+            return random.sample(replay_buffer, self.batch_size)
+    
+    def train_batch(self, states, policies, values, optimizer):
+        """
+        Train the model on a single batch.
+        
+        Args:
+            states: List of chess.Board states
+            policies: List of policy vectors
+            values: List of value targets
+            optimizer: PyTorch optimizer
+            
+        Returns:
+            Dictionary of loss values
+        """
+        # Convert to tensors
+        state_tensors = []
+        for state in states:
+            # Convert state to tensor format that model expects
+            s_tensor = Agent.state_to_tensor(state)
+            state_tensors.append(s_tensor)
+        
+        states_batch = torch.cat(state_tensors).to(self.device)
+        policies_batch = torch.FloatTensor(policies).to(self.device)
+        values_batch = torch.FloatTensor(values).to(self.device).unsqueeze(1)
+        
+        # Zero gradients
+        optimizer.zero_grad()
+        
+        # Forward pass
+        policy_logits, value_preds = self.model(states_batch)
+        
+        # Calculate losses
+        policy_loss = -(policies_batch * torch.log_softmax(policy_logits, dim=1)).sum(dim=1).mean()
+        value_loss = ((values_batch - value_preds) ** 2).mean()
+        
+        # Total loss
+        loss = policy_loss + value_loss
+        
+        # Backward pass and optimize
+        loss.backward()
+        optimizer.step()
+        
+        return {
+            'loss': loss.item(),
+            'policy_loss': policy_loss.item(),
+            'value_loss': value_loss.item()
+        }
+    
+    def train_random_batches(self, replay_buffer, optimizer, n_batches=None):
+        """
+        Train the model on random batches from the replay buffer.
+        
+        Args:
+            replay_buffer: List of (state, policy, value) tuples
+            optimizer: PyTorch optimizer
+            n_batches: Number of batches to train on (default: 2*max(5, len(replay_buffer)//batch_size))
+            
+        Returns:
+            List of loss dictionaries
+        """
+        if n_batches is None:
+            n_batches = 2 * max(5, len(replay_buffer) // self.batch_size)
+        
+        history = []
+        
+        try:
+            from tqdm import tqdm
+            batch_iter = tqdm(range(n_batches), desc="Training batches")
+        except ImportError:
+            batch_iter = range(n_batches)
+        
+        for _ in batch_iter:
+            # Sample random batch
+            batch = self.sample_batch(replay_buffer)
+            states, policies, values = zip(*batch)
+            
+            # Train on batch
+            losses = self.train_batch(states, policies, values, optimizer)
+            history.append(losses)
+        
+        return history
+    
+    def plot_loss(self, history, save_path=None):
+        """
+        Plot training loss history.
+        
+        Args:
+            history: List of loss dictionaries
+            save_path: Path to save the plot (default: config.LOSS_PLOTS_FOLDER)
+        """
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        from datetime import datetime
+        
+        df = pd.DataFrame(history)
+        
+        plt.figure(figsize=(10, 6))
+        plt.plot(df['loss'], label='Total Loss')
+        plt.plot(df['policy_loss'], label='Policy Loss')
+        plt.plot(df['value_loss'], label='Value Loss')
+        plt.legend()
+        plt.title(f"Loss over time (Learning rate: {config.LEARNING_RATE})")
+        plt.xlabel('Batches')
+        plt.ylabel('Loss')
+        
+        if save_path is None:
+            save_path = os.path.join(config.LOSS_PLOTS_FOLDER, 
+                                   f"loss-{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.png")
+        
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path)
+        logging.info(f"Loss plot saved to {save_path}")
+        plt.close()
 
-def batchify(batch):
-    """
-    Convert a batch of (state, policy, value) to tensors.
-    """
-    states, policies, values = zip(*batch)
-    agent = Agent(model_path=None)  # For state_to_tensor
-    state_tensors = torch.cat([agent.state_to_tensor(s).unsqueeze(0) for s in states], dim=0)
-    policy_tensors = torch.tensor(np.stack(policies), dtype=torch.float32)
-    value_tensors = torch.tensor(values, dtype=torch.float32).unsqueeze(1)
-    return state_tensors, policy_tensors, value_tensors
+    def save_model(self, path=None):
+        """
+        Save the model to disk.
+        
+        Args:
+            path: Path to save the model (default: auto-generated with timestamp)
+        """
+        from datetime import datetime
+        
+        if path is None:
+            os.makedirs(config.MODEL_FOLDER, exist_ok=True)
+            path = os.path.join(config.MODEL_FOLDER, 
+                              f"model-{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.pt")
+        
+        torch.save(self.model.state_dict(), path)
+        logging.info(f"Model saved to {path}")
+        return path
 
 def generate_game(model_path, game_id):
-    """
-    Generate a single self-play game in a separate process
+    """Generate a self-play game for multiprocessing."""
+    import chess
+    import torch
+    from agent import Agent
     
-    Args:
-        model_path: Path to the neural network model
-        game_id: Unique identifier for this game (used for logging)
-        
-    Returns:
-        states, policies, values: Lists of game states, policy targets, and value targets
-    """
-    # Set process name for better monitoring
-    try:
-        import setproctitle
-        setproctitle.setproctitle(f"chess-drl: game-{game_id}")
-    except ImportError:
-        pass
-    
-    # Initialize agent with the model
     agent = Agent(model_path=model_path)
     board = chess.Board()
     states, policies, values = [], [], []
     move_count = 0
     
-    # Set up logging for this process
-    game_logger = logging.getLogger(f"game-{game_id}")
-    game_logger.setLevel(logging.INFO)
+    print(f"Game {game_id} starting")
     
-    # Play game until termination
-    start_time = time.time()
-    agent.state = board.fen()
-    
-    # Play until game is over or move limit reached
     while not board.is_game_over() and move_count < config.MAX_GAME_MOVES:
+        if move_count % 5 == 0:  # Log every 5 moves
+            print(f"Game {game_id}: Move {move_count}")
         agent.state = board.fen()
-        agent.run_simulations(config.SIMULATIONS_PER_MOVE)
-        
-        # Get move probabilities from MCTS
-        actions, probs = agent.mcts.get_move_probs()
-        
-        # Filter only legal moves
-        legal_actions = []
-        legal_probs = []
-        for action, prob in zip(actions, probs):
-            if action in board.legal_moves:
-                legal_actions.append(action)
-                legal_probs.append(prob)
-        
-        # Renormalize probabilities if needed
-        if legal_actions and sum(legal_probs) > 0:
-            legal_probs = np.array(legal_probs) / sum(legal_probs)
-            # Sample a move proportionally to the probabilities
-            move = np.random.choice(legal_actions, p=legal_probs)
-        else:
-            # Fallback to a random legal move if no legal moves in the MCTS results
-            move = np.random.choice(list(board.legal_moves))
-        
-        # Store state and policy
-        states.append(board.copy())
-        
-        # Create policy vector (one-hot at the selected move indices)
-        policy = np.zeros(config.OUTPUT_SHAPE[0], dtype=np.float32)
-        for i, a in enumerate(actions):
-            idx = move_to_index(a)
-            policy[idx] = probs[i]
-        
-        policies.append(policy)
-        
-        # Make the move
-        board.push(move)
-        move_count += 1
-        
-        # Add some temperature decay as the game progresses
-        if move_count == 30:  # After 30 moves, use lower temperature
-            agent.mcts.exploration_weight *= 0.8
+        try:
+            # Time the simulation step
+            sim_start = time.time()
+            agent.run_simulations(config.SIMULATIONS_PER_MOVE)
+            sim_time = time.time() - sim_start
+            if sim_time > 10:  # Log if simulations take too long
+                print(f"Game {game_id}: Simulations took {sim_time:.1f}s")
+            
+            # Get move probabilities from MCTS
+            actions, probs = agent.mcts.get_move_probs()
+            
+            # Filter only legal moves
+            legal_actions = []
+            legal_probs = []
+            for action, prob in zip(actions, probs):
+                if action in board.legal_moves:
+                    legal_actions.append(action)
+                    legal_probs.append(prob)
+            
+            # Renormalize probabilities if needed
+            if legal_actions and sum(legal_probs) > 0:
+                legal_probs = np.array(legal_probs) / sum(legal_probs)
+                # Sample a move proportionally to the probabilities
+                move = np.random.choice(legal_actions, p=legal_probs)
+            else:
+                # Fallback to a random legal move if no legal moves in the MCTS results
+                print(f"Game {game_id}: No legal moves from MCTS, using random move")
+                move = np.random.choice(list(board.legal_moves))
+            
+            # Store state and policy
+            states.append(board.copy())
+            
+            # Create policy vector (one-hot at the selected move indices)
+            policy = np.zeros(config.OUTPUT_SHAPE[0], dtype=np.float32)
+            for i, a in enumerate(actions):
+                idx = move_to_index(a)
+                if idx < len(policy):  # Safety check
+                    policy[idx] = probs[i]
+            
+            policies.append(policy)
+            
+            # Make the move
+            board.push(move)
+            move_count += 1
+            
+        except Exception as e:
+            print(f"Game {game_id} error: {e}")
+            # Save the board state for debugging
+            with open(f"error_board_game_{game_id}.fen", "w") as f:
+                f.write(board.fen())
+            break
     
-    # Get game result and assign values
+    # Game is over, assign values
     result = board.result()
-    game_logger.info(f"Game {game_id} finished after {move_count} moves. Result: {result}. Time: {time.time() - start_time:.1f}s")
+    print(f"Game {game_id} finished after {move_count} moves. Result: {result}")
     
-    if result == '1-0':
-        z = 1
-    elif result == '0-1':
-        z = -1
-    else:
-        z = 0
+    # Calculate game outcome
+    if result == '1-0':  # White win
+        z = 1.0
+    elif result == '0-1':  # Black win
+        z = -1.0
+    else:  # Draw
+        z = 0.0
     
-    # Assign values alternating between players
-    values = [z if i % 2 == 0 else -z for i in range(len(states))]
+    # Set value for each state (alternating perspectives)
+    values = []
+    for i in range(len(states)):
+        # Flip the perspective for black's moves
+        values.append(z if i % 2 == 0 else -z)
     
-    game_logger.info(f"Game {game_id} generated {len(states)} training examples")
-    
-    # Return the collected data
     return states, policies, values
 
-def generate_selfplay_data_parallel(model_path, n_games=10):
+def load_selfplay_data(data_path):
+    """Load pre-generated self-play data from a file."""
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(f"Data file not found: {data_path}")
+        
+    logging.info(f"Loading data from {data_path}...")
+    data = np.load(data_path, allow_pickle=True)
+    
+    # Convert FENs back to board objects
+    states = [chess.Board(fen) for fen in data['states']]
+    policies = data['policies']
+    values = data['values']
+    
+    # Return as tuple for direct loading
+    return states, policies, values
+
+def visualize_selfplay_game(model_path):
+    """Visualize a self-play game using GUI."""
+    try:
+        # Import self_play function from selfplay.py
+        from selfplay import setup, self_play
+        
+        # Start GUI in a separate process to avoid blocking training
+        gui_process = mp.Process(target=lambda: self_play(setup(model_path=model_path)))
+        gui_process.start()
+        return gui_process
+    except ImportError as e:
+        logging.warning(f"Could not visualize self-play game: {e}")
+        return None
+
+def run_gui_game(model_path):
+    """Run a game with GUI visualization."""
+    from gui.display import GUI
+    from env import Chess_Env
+    from game import Game
+    
+    env = Chess_Env()
+    white_agent = Agent(model_path=model_path)
+    black_agent = Agent(model_path=model_path)
+    game = Game(env, white_agent, black_agent)
+    
+    game.reset()
+    gui = GUI(game, player_is_white=True)
+    gui.start()
+    
+    while not game.is_over():
+        if game.current_player_is_white():
+            move = white_agent.get_move(game.env)
+        else:
+            move = black_agent.get_move(game.env)
+        game.push(move)
+        gui.draw()
+        time.sleep(0.5)  # Small delay to make moves visible
+    
+    time.sleep(5)  # Wait to show final position
+
+def batchify(states, device):
     """
-    Generate self-play data using multiple processes
+    Convert a list of board states to a batch of tensors suitable for the neural network.
     
     Args:
-        model_path: Path to the neural network model
-        n_games: Number of games to generate in parallel
+        states: List of chess.Board objects
+        device: The device (CPU/GPU) to place tensors on
         
     Returns:
-        None (adds data to the replay buffer)
+        torch.Tensor: Batch of state representations
     """
-    # Determine number of processes to use
-    num_processes = min(config.NUM_WORKERS, mp.cpu_count(), n_games)
-    logging.info(f"Generating {n_games} self-play games using {num_processes} processes")
+    import torch
+    batch = []
+    for state in states:
+        # Convert state to tensor format using Agent's method
+        state_tensor = Agent.state_to_tensor(state)
+        batch.append(state_tensor)
     
-    start_time = time.time()
+    # Concatenate all tensors into a batch
+    return torch.cat(batch).to(device)
+
+def train_network(model, states, policies, values, optimizer, device):
+    """
+    Train the neural network on a batch of examples.
     
-    # For PyTorch models, use torch's multiprocessing to handle CUDA properly
-    if config.USE_GPU and torch.cuda.is_available():
-        # Set start method to spawn for CUDA compatibility
-        try:
-            torch_mp.set_start_method('spawn', force=True)
-        except RuntimeError:
-            pass
-        mp_context = torch_mp
-    else:
-        mp_context = mp
+    Args:
+        model: The neural network model
+        states: List of board states
+        policies: List of move probabilities (policy targets)
+        values: List of game outcomes (value targets)
+        optimizer: The optimizer
+        device: The device to use (CPU/GPU)
     
-    # Create temporary model file for processes to load
-    # This avoids sharing the model directly which can cause issues
-    temp_model_path = os.path.join(config.MODEL_FOLDER, f"temp_model_{int(time.time())}.pt")
-    if os.path.exists(model_path):
-        # Load and immediately save the model to the temp path
-        model = RLModelBuilder(
-            config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]
-        ).build_model(model_path)
-        torch.save(model.state_dict(), temp_model_path)
+    Returns:
+        policy_loss, value_loss, total_loss
+    """
+    batch_start_time = time.time()
+    
+    # Convert to tensors
+    state_tensors = []
+    for state in states:
+        # Convert state to tensor format that model expects
+        s_tensor = Agent.state_to_tensor(state)
+        state_tensors.append(s_tensor)
+    
+    states_batch = torch.cat(state_tensors).to(device)
+    policies_batch = torch.FloatTensor(policies).to(device)
+    values_batch = torch.FloatTensor(values).to(device).unsqueeze(1)
+    
+    # Zero gradients
+    optimizer.zero_grad()
+    
+    # Forward pass
+    policy_logits, value_preds = model(states_batch)
+    
+    # Calculate losses
+    policy_loss = -(policies_batch * torch.log_softmax(policy_logits, dim=1)).sum(dim=1).mean()
+    value_loss = ((values_batch - value_preds) ** 2).mean()
+    
+    # Total loss
+    loss = policy_loss + value_loss
+    
+    # Backward pass and optimize
+    loss.backward()
+    optimizer.step()
+    
+    batch_time = time.time() - batch_start_time
+    
+    return policy_loss.item(), value_loss.item(), loss.item(), batch_time
+
+def evaluate_model(current_model_path, previous_model_path=None, n_evaluation_games=10):
+    """Evaluate current model against previous version to measure improvement."""
+    if previous_model_path is None or not os.path.exists(previous_model_path):
+        logging.info(f"No previous model to compare against")
+        return True, 0.0  # Accept new model by default
     
     try:
-        # Use Pool for parallel processing
-        with mp_context.Pool(num_processes) as pool:
-            game_fn = partial(generate_game, temp_model_path)
-            
-            # Track progress with tqdm if available
-            try:
-                from tqdm import tqdm
-                results = list(tqdm(pool.imap(game_fn, range(n_games)), total=n_games, desc="Self-play games"))
-            except ImportError:
-                results = pool.map(game_fn, range(n_games))
+        logging.info(f"Evaluating current model against previous version...")
+        evaluator = Evaluator(current_model_path, previous_model_path)
+        results = evaluator.evaluate(n_games=n_evaluation_games, verbose=True)
         
-        # Collect results
-        all_states, all_policies, all_values = [], [], []
-        total_positions = 0
+        # Extract key metrics
+        win_rate = results.get('win_rate', 0.0)
+        draw_rate = results.get('draw_rate', 0.0)
+        loss_rate = results.get('loss_rate', 0.0)
+        elo_diff = results.get('elo_difference', 0.0)
         
-        for states, policies, values in results:
-            all_states.extend(states)
-            all_policies.extend(policies)
-            all_values.extend(values)
-            total_positions += len(states)
+        # Decision rule: accept if win_rate > 52% or elo_diff > 0
+        accept_new_model = win_rate > 0.52 or elo_diff > 0
         
-        # Add to replay buffer
-        for s, p, v in zip(all_states, all_policies, all_values):
-            replay_buffer.append((s, p, v))
+        if accept_new_model:
+            logging.info(f"NEW MODEL ACCEPTED: Win rate: {win_rate:.1%}, ELO difference: {elo_diff:.1f}")
+        else:
+            logging.info(f"NEW MODEL REJECTED: Win rate: {win_rate:.1%}, ELO difference: {elo_diff:.1f}")
         
-        elapsed_time = time.time() - start_time
-        positions_per_second = total_positions / elapsed_time if elapsed_time > 0 else 0
-        
-        logging.info(f"Generated {total_positions} positions from {n_games} games in {elapsed_time:.1f}s "
-                    f"({positions_per_second:.1f} positions/s)")
-        logging.info(f"Replay buffer now contains {len(replay_buffer)} examples")
-        
-    finally:
-        # Clean up temporary model file
-        if os.path.exists(temp_model_path):
-            try:
-                os.remove(temp_model_path)
-            except Exception as e:
-                logging.warning(f"Failed to remove temporary model file: {e}")
+        return accept_new_model, elo_diff
+    
+    except Exception as e:
+        logging.error(f"Evaluation error: {e}")
+        return True, 0.0  # Accept by default in case of error
 
-# Integration with main training loop
 def main():
-    # Define device
+    # Parse arguments
+    import argparse
+    parser = argparse.ArgumentParser(description="Train chess model using reinforcement learning")
+    parser.add_argument("--model", type=str, help="Path to model for continued training")
+    parser.add_argument("--data", type=str, default="./memory/selfplay_data.npz",
+                       help="Path to pre-generated self-play data")
+    parser.add_argument("--epochs", type=int, default=N_EPOCHS, help="Number of training epochs")
+    parser.add_argument("--visualize", action="store_true", help="Visualize self-play games")
+    parser.add_argument("--generate", action="store_true", 
+                       help="Generate additional data during training (default: False)")
+    args = parser.parse_args()
+    
+    # Override config if provided
+    epochs = args.epochs
+    model_path = args.model if args.model else os.path.join(config.MODEL_FOLDER, "initial_model.pt")
+    
+    # Set device
     device = torch.device("cuda" if torch.cuda.is_available() and config.USE_GPU else "cpu")
     logging.info(f"Using device: {device}")
     
-    # Define initial model path
-    initial_model_path = f"{config.MODEL_FOLDER}/initial_model.pt"
-    
-    # Build model and optimizer using config - ensure model is on GPU
+    # Initialize model
     model = RLModelBuilder(
         config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]
-    ).build_model()
-    model = model.to(device)  # Move model to GPU
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    ).build_model(model_path)
+    model.to(device)
     
-    # Save the initial model if it doesn't exist
-    import os
-    os.makedirs(config.MODEL_FOLDER, exist_ok=True)
-    if not os.path.exists(initial_model_path):
-        torch.save(model.state_dict(), initial_model_path)
-        logging.info(f"Saved initial model to {initial_model_path}")
-
-    agent = Agent(model_path=initial_model_path)
-    agent.model = model  # Use the model directly
-
-    # Generate initial self-play data with multiprocessing
-    logging.info("Generating initial self-play data...")
-    if config.NUM_WORKERS > 1:
-        generate_selfplay_data_parallel(initial_model_path, n_games=N_SELFPLAY_GAMES)
-    else:
-        generate_selfplay_data(agent, n_games=N_SELFPLAY_GAMES)
-    logging.info(f"Replay buffer size: {len(replay_buffer)}")
-
-    # Training loop
-    for epoch in range(N_EPOCHS):
-        if len(replay_buffer) < BATCH_SIZE:
-            logging.warning("Not enough samples in replay buffer to train.")
-            continue
-            
-        # Sample batch and move to GPU
-        batch = random.sample(replay_buffer, BATCH_SIZE)
-        states, target_policies, target_values = batchify(batch)
-        states = states.to(device)
-        target_policies = target_policies.to(device)
-        target_values = target_values.to(device)
-
-        # Training step with mixed precision if available
-        model.train()
-        optimizer.zero_grad()
+    # Initialize optimizer
+    weight_decay = getattr(config, 'WEIGHT_DECAY', 1e-4)  # Default if not in config
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=weight_decay)
+    
+    # Initialize trainer
+    trainer = Trainer(model, device)
+    
+    # Load pre-generated data
+    if os.path.exists(args.data):
+        logging.info(f"Loading pre-generated data from {args.data}")
+        states, policies, values = load_selfplay_data(args.data)
         
-        # Use automatic mixed precision for faster training if available
-        if hasattr(torch.cuda, 'amp') and device.type == 'cuda':
-            from torch.cuda.amp import autocast, GradScaler
-            scaler = GradScaler()
-            
-            with autocast():
-                policy_pred, value_pred = model(states)
-                loss_policy = torch.nn.functional.cross_entropy(policy_pred, target_policies)
-                loss_value = torch.nn.functional.mse_loss(value_pred, target_values)
-                loss = loss_policy + loss_value
-                
-            # Scale gradients and optimize
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            # Standard training path
-            policy_pred, value_pred = model(states)
-            loss_policy = torch.nn.functional.cross_entropy(policy_pred, target_policies)
-            loss_value = torch.nn.functional.mse_loss(value_pred, target_values)
-            loss = loss_policy + loss_value
-            
-            loss.backward()
-            optimizer.step()
-
-        logging.info(f"Epoch {epoch+1}/{N_EPOCHS} | Loss: {loss.item():.4f} | "
-                    f"Policy Loss: {loss_policy.item():.4f} | Value Loss: {loss_value.item():.4f}")
-
-        # Generate more self-play data periodically
-        if (epoch + 1) % 10 == 0:
-            logging.info("Generating more self-play data...")
-            # Use model evaluation mode for inference
-            model.eval()
-            
-            # Save a temporary model for multiprocessing
-            temp_path = f"{config.MODEL_FOLDER}/model_epoch_{epoch+1}_temp.pt"
-            torch.save(model.state_dict(), temp_path)
-            
-            # Generate data with multiprocessing
-            if config.NUM_WORKERS > 1:
-                generate_selfplay_data_parallel(temp_path, n_games=2)
-            else:
-                generate_selfplay_data(agent, n_games=2)
-                
-            # Remove temporary model
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-                
-            model.train()
-
-        # Save model every 10 epochs
-        if (epoch + 1) % 10 == 0:
-            save_path = f"{config.MODEL_FOLDER}/model_epoch_{epoch+1}.pt"
-            torch.save(model.state_dict(), save_path)
-            logging.info(f"Model saved at {save_path}")
-            
-    # Save final model
-    final_model_path = f"{config.MODEL_FOLDER}/model_final.pt"
-    torch.save(model.state_dict(), final_model_path)
-    logging.info(f"Final model saved at {final_model_path}")
+        # Add to replay buffer
+        for s, p, v in zip(states, policies, values):
+            replay_buffer.append((s, p, v))
+        
+        logging.info(f"Loaded {len(replay_buffer)} positions into replay buffer")
     
-    return model
+    # Generate initial data if needed
+    if len(replay_buffer) < BATCH_SIZE and args.generate:
+        logging.info("Generating initial self-play data...")
+        generate_selfplay_data_parallel(model_path, n_games=N_SELFPLAY_GAMES)
+    elif len(replay_buffer) < BATCH_SIZE:
+        raise ValueError("Not enough training data and --generate not specified")
+    
+    # Training loop
+    best_model_path = model_path
+    for epoch in range(epochs):
+        epoch_start_time = time.time()
+        logging.info(f"\nEpoch {epoch+1}/{epochs}")
+        
+        # Visualize a self-play game occasionally
+        if args.visualize and epoch % 5 == 0:
+            gui_process = visualize_selfplay_game(model_path)
+        
+        # Training phase
+        model.train()
+        logging.info(f"Training on {len(replay_buffer)} positions...")
+        history = trainer.train_random_batches(replay_buffer, optimizer)
+        
+        # Plot losses
+        trainer.plot_loss(history)
+        
+        # Save current model
+        current_model_path = os.path.join(config.MODEL_FOLDER, f"model_epoch_{epoch+1}.pt")
+        torch.save(model.state_dict(), current_model_path)
+        logging.info(f"Model saved to {current_model_path}")
+        
+        # Evaluate against previous best model
+        if epoch > 0 and config.EVALUATION_GAMES > 0:
+            is_better, elo_gain = evaluate_model(
+                current_model_path, 
+                best_model_path, 
+                n_evaluation_games=config.EVALUATION_GAMES
+            )
+            
+            if is_better:
+                best_model_path = current_model_path
+                logging.info(f"New best model! ELO gain: {elo_gain:.1f}")
+        
+        # Generate new self-play data with current model (if requested)
+        if args.generate:
+            logging.info("Generating new self-play data...")
+            generate_selfplay_data_parallel(current_model_path, n_games=N_SELFPLAY_GAMES)
+        
+        # Log epoch time
+        epoch_time = time.time() - epoch_start_time
+        logging.info(f"Epoch {epoch+1} completed in {epoch_time:.1f}s")
+    
+    # Save final model
+    final_model_path = os.path.join(config.MODEL_FOLDER, "model_final.pt")
+    torch.save(model.state_dict(), final_model_path)
+    logging.info(f"\nTraining completed! Final model saved to {final_model_path}")
+    
+    # Copy the best model to the final model if we did evaluations
+    if config.EVALUATION_GAMES > 0 and best_model_path != final_model_path:
+        import shutil
+        shutil.copyfile(best_model_path, final_model_path)
+        logging.info(f"Best model from training ({os.path.basename(best_model_path)}) copied to {final_model_path}")
+
+if __name__ == "__main__":
+    main()

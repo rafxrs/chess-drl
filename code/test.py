@@ -14,7 +14,7 @@ from datetime import datetime
 from matplotlib.ticker import MaxNLocator
 from agent import Agent
 from env import Chess_Env
-from mcts.mcts import MCTS
+from mcts import MCTS
 from modelbuilder import RLModelBuilder
 from train import move_to_index, batchify, generate_selfplay_data, generate_game
 
