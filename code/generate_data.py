@@ -18,9 +18,6 @@ logging.basicConfig(level=logging.INFO, format=" %(message)s")
 def generate_game(model_path, game_id, device=None):
     """Generate a self-play game for multiprocessing."""
     try:
-        # Force device to CPU for multiprocessing safety
-        device = torch.device("cpu")  # This is safest for multiprocessing
-        
         # Pass device to Agent
         agent = Agent(model_path=model_path, device=device)
         board = chess.Board()
@@ -224,14 +221,32 @@ def generate_selfplay_data_parallel(model_path, n_games=10, output_path=None, de
 def visualize_game(model_path):
     """Visualize a self-play game using selfplay.py."""
     try:
+        import pygame
+        import chess
+        import time
+        
+        # Set the model paths in config temporarily
+        import config
+        config.WHITE_MODEL_PATH = model_path
+        config.BLACK_MODEL_PATH = model_path
+        
         from selfplay import setup, self_play
         
-        # Use selfplay.py's functionality
-        setup_data = setup(model_path=model_path)
-        self_play(setup_data)
+        logging.info("Setting up visualization...")
         
-    except ImportError as e:
-        logging.warning(f"Could not visualize self-play game: {e}")
+        # Create game instance using setup
+        game = setup(starting_position=chess.STARTING_FEN)
+        
+        # Run self_play with the game instance
+        logging.info("Starting visualization...")
+        self_play(game, player_is_white=True, n_games=1)
+        
+    except Exception as e:
+        logging.error(f"Could not visualize self-play game: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 
 def main():
     # Parse arguments
@@ -253,23 +268,31 @@ def main():
     if args.gpu and torch.cuda.is_available():
         device = torch.device("cuda")
         logging.info(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        
+        # For GPU, use fewer processes but still utilize multiprocessing
+        if device.type == 'cuda':
+            # Override to lower process count for GPU
+            config.NUM_WORKERS = 1
+            logging.info(f"Using {config.NUM_WORKERS} processes with GPU acceleration")
     else:
         device = torch.device("cpu")
         logging.info("Using CPU for data generation")
-    
+
     # Set up paths
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     os.makedirs(config.MODEL_FOLDER, exist_ok=True)
     
-    # Generate data
-    logging.info(f"Generating {args.games} self-play games using model {args.model}")
-    
-    generate_selfplay_data_parallel(args.model, args.games, args.output, device)
-    
-    # Visualize a game if requested
     if args.visualize:
         logging.info("Visualizing a self-play game...")
         visualize_game(args.model)
+        # Optional: return after visualization if you don't want to continue with data generation
+        # return
+    
+    # Generate data
+    logging.info(f"Generating {args.games} self-play games using model {args.model}")
+    generate_selfplay_data_parallel(args.model, args.games, args.output, device)
+    
+
 
 if __name__ == "__main__":
     main()

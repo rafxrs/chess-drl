@@ -2,7 +2,7 @@
 import os
 from dotenv import load_dotenv
 load_dotenv()
-
+DEVICE = "cpu"
 # ============= MCTS =============
 SIMULATIONS_PER_MOVE = int(os.environ.get("SIMULATIONS_PER_MOVE", 200))
 
@@ -52,7 +52,8 @@ CONVOLUTION_FILTERS = 256
 # ==> First train a small NN, then optimize longer with a larger NN.
 AMOUNT_OF_RESIDUAL_BLOCKS = 19
 MODEL_FOLDER = os.environ.get("MODEL_FOLDER" ,'./models')
-
+WHITE_MODEL_PATH = os.path.join(MODEL_FOLDER, "initial_model.pt")
+BLACK_MODEL_PATH = os.path.join(MODEL_FOLDER, "initial_model.pt")
 # ============= TRAINING PARAMETERS =============
 BATCH_SIZE = 1024 # batch size for training (should be high if using GPU)
 N_EPOCHS = 100 # number of epochs to train the model
@@ -62,6 +63,7 @@ EVALUATION_GAMES = 25  # Number of games to play for evaluation
 # ============= MEMORY CONFIGURATION =============
 MEMORY_DIR = os.environ.get("MEMORY_FOLDER", "./memory")
 MAX_REPLAY_MEMORY = 1000000
+MAX_MEMORY_SIZE = 100000
 # ============= GPU & MULTIPROCESSING =============
 USE_GPU = True
 NUM_WORKERS = 5 # Or mp.cpu_count()

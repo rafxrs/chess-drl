@@ -1,3 +1,4 @@
+# interacts with the chess environment and uses MCTS and a neural network for decision-making.
 import torch
 import chess
 import logging
@@ -81,6 +82,21 @@ class Agent:
         actions, probs = self.mcts.get_move_probs()
         move = np.random.choice(actions, p=probs)
         return move
+    
+    def play_move(self, env, stochastic=True, previous_moves=None):
+        """
+        Compatibility method that wraps get_move.
+        
+        Args:
+            env: Chess environment
+            stochastic: Whether to use stochastic move selection
+            previous_moves: List of previous moves
+        
+        Returns:
+            chess.Move: Selected move
+        """
+        # Simply delegate to get_move
+        return self.get_move(env)
 
     def predict(self, state_tensor):
         """
@@ -142,7 +158,8 @@ class Agent:
             
         return policy, value
 
-    def state_to_tensor(self, state, add_batch=True):
+    @staticmethod
+    def state_to_tensor(state, add_batch=True):
         """
         Convert a chess.Board to a tensor for the neural network.
         
@@ -220,7 +237,7 @@ class Agent:
         tensor = torch.from_numpy(planes).float()
         
         # Move tensor to the correct device
-        tensor = tensor.to(self.device)
+        tensor = tensor.to(config.DEVICE)
         
         # Add batch dimension if needed
         if add_batch:

@@ -55,14 +55,6 @@ class Game:
         else:
             raise ValueError(f"Invalid result string: {result}")
         
-    @utils.time_function
-    def play_one_game(self, stochastic: bool = True) -> int:
-        """
-        Play one game from the starting position, and save it to memory.
-        Keep playing moves until either the game is over, or it has reached the move limit.
-        If the move limit is reached, the winner is estimated.
-        """
-        
     def play_move(self, stochastic: bool = True, previous_moves: tuple[Edge, Edge] = (None, None), save_moves: bool = True) -> None:
         """
             Play one move. If stochastic is True, the move is chosen using a probability distribution.
@@ -82,7 +74,7 @@ class Game:
         move = agent.play_move(self.env, stochastic=stochastic, previous_moves=previous_moves)
         
         # Update the environment
-        self.env.play_move(move)
+        self.env.push(move)
         
         # Save the move
         if save_moves:
@@ -91,7 +83,7 @@ class Game:
         # Check if the game is over
         if self.env.is_game_over():
             self.game_over = True
-            self.winner = Game.get_winner(self.env.result())
+            self.winner = Game.get_winner(self.env.get_result())
         
         # Switch turn
         self.turn = not self.turn
@@ -121,14 +113,54 @@ class Game:
             return
         
         # Create the directory if it doesn't exist
-        os.makedirs(config.GAMES_DIR, exist_ok=True)
+        os.makedirs(config.MEMORY_DIR, exist_ok=True)
         
         # Save the memory to a .npy file
-        file_path = os.path.join(config.GAMES_DIR, f"{name}.npy")
+        file_path = os.path.join(config.MEMORY_DIR, f"{name}.npy")
         np.save(file_path, self.memory)
         
         logging.info(f"Game saved to {file_path}")
+
+    def push(self, move):
+        """
+        Push a move to the board. This is a compatibility method used by the visualization.
+        """
+        # Make the move on the environment
+        success = self.env.push(move)
         
-        # If full_game is True, save the game as a PGN file
-        if full_game:
-            self.save_as_pgn(name)
+        # Store the move if successful
+        if success:
+            self.moves.append(move)
+            
+            # Update game state
+            if self.env.is_game_over():
+                self.game_over = True
+                try:
+                    self.winner = Game.get_winner(self.env.get_result())
+                except ValueError:
+                    # Handle undecided results
+                    self.winner = 0
+            
+            # Switch turn
+            self.turn = not self.turn
+        
+        return success
+
+    def current_player_is_white(self):
+        """
+        Check if the current player is white.
+        """
+        return self.env.board.turn == chess.WHITE
+
+    def result(self):
+        """
+        Get the result of the game.
+        """
+        return self.env.board.result() if self.env.is_game_over() else "*"
+
+    def is_over(self):
+        """
+        Check if the game is over.
+        """
+        return self.env.is_game_over()
+            
