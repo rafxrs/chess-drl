@@ -3,6 +3,7 @@ import time
 import logging
 import numpy as np
 import argparse
+import torch
 
 from tqdm import tqdm
 from agent import Agent
@@ -38,14 +39,6 @@ class Evaluator:
         """
         Evaluate the models by playing n_games against each other (2*n_games total games).
         Each model plays both as white and black.
-        
-        Args:
-            n_games: Number of games to play (each model plays n_games as white)
-            verbose: Whether to print progress information
-            simulations_per_move: Override config.SIMULATIONS_PER_MOVE
-            
-        Returns:
-            A results dictionary and a summary string
         """
         score = {
             "model_1_wins": 0,
@@ -55,8 +48,8 @@ class Evaluator:
         }
         
         # Create agents
-        agent_1 = Agent(model_path=self.model_1_path)
-        agent_2 = Agent(model_path=self.model_2_path)
+        agent_1 = Agent(model_path=self.model_1_path, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+        agent_2 = Agent(model_path=self.model_2_path, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
         
         # Set simulations per move if provided
         if simulations_per_move:

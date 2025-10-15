@@ -80,7 +80,23 @@ class Agent:
         self.state = env.board.fen()
         self.run_simulations(config.SIMULATIONS_PER_MOVE)
         actions, probs = self.mcts.get_move_probs()
-        move = np.random.choice(actions, p=probs)
+
+        # Filter legal moves
+        legal_actions = [action for action in actions if action in env.board.legal_moves]
+        legal_probs = [probs[i] for i, action in enumerate(actions) if action in env.board.legal_moves]
+
+        # Debug: Print actions and probabilities
+        print(f"Actions: {legal_actions}")
+        print(f"Probabilities: {legal_probs}")
+
+        # Normalize probabilities
+        if legal_probs and sum(legal_probs) > 0:
+            legal_probs = np.array(legal_probs) / sum(legal_probs)
+            move = np.random.choice(legal_actions, p=legal_probs)
+        else:
+            # Fallback to a random legal move
+            move = np.random.choice(list(env.board.legal_moves))
+
         return move
     
     def play_move(self, env, stochastic=True, previous_moves=None):
@@ -142,18 +158,16 @@ class Agent:
         
         # Handle list of states vs. preprocessed tensor
         if isinstance(states_batch, list):
-            # Convert list of states to tensor batch
             tensors = [self.state_to_tensor(s, add_batch=False) for s in states_batch]
-            state_tensor = torch.cat(tensors, dim=0).to(self.device)
-        else:
-            # Already a tensor, just move to device
-            state_tensor = states_batch.to(self.device)
+            states_batch = torch.cat(tensors, dim=0).to(self.device)
+        elif states_batch.device != self.device:
+            states_batch = states_batch.to(self.device)
         
         with torch.no_grad():
-            policy, value = self.model(state_tensor)
+            policy, value = self.model(states_batch)
             
         # Optional: clear CUDA cache on large batches
-        if state_tensor.size(0) > 64 and self.device.type == 'cuda':
+        if states_batch.size(0) > 64 and self.device.type == 'cuda':
             torch.cuda.empty_cache()
             
         return policy, value
