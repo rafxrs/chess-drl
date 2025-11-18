@@ -2,7 +2,8 @@
 import os
 from dotenv import load_dotenv
 load_dotenv()
-DEVICE = "cpu"
+# ============= DEVICE =============
+DEVICE = "cuda" if os.environ.get("USE_GPU", "True").lower() == "true" and os.path.exists("/dev/nvidia0") else "cpu"
 # ============= MCTS =============
 SIMULATIONS_PER_MOVE = int(os.environ.get("SIMULATIONS_PER_MOVE", 200))
 
@@ -10,9 +11,7 @@ SIMULATIONS_PER_MOVE = int(os.environ.get("SIMULATIONS_PER_MOVE", 200))
 C_base = 20000
 C_init = 2
 DIRICHLET_NOISE = 0.3 # alpha for Dirichlet noise
-
-# limit the amount of moves played in a game
-MAX_GAME_MOVES = 200
+MAX_GAME_MOVES = 200 # limit the amount of moves played in a game
 
 # ============= NEURAL NETWORK INPUTS =============
 # 2 players, 6 pieces, 8x8 board
@@ -66,4 +65,4 @@ MAX_REPLAY_MEMORY = 1000000
 MAX_MEMORY_SIZE = 100000
 # ============= GPU & MULTIPROCESSING =============
 USE_GPU = True
-NUM_WORKERS = 5 # Or mp.cpu_count()
+NUM_WORKERS = 8 # Or mp.cpu_count()

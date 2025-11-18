@@ -274,4 +274,4 @@ This project is inspired by DeepMind's AlphaZero and builds upon several open-so
 
 ## References
 - Silver, D. et al. (2017). Mastering Chess and Shogi by Self-Play with a General Reinforcement Learning Algorithm.
-- pip install -r code/requirements.txtSilver, D. et al. (2018). A general reinforcement learning algorithm that masters chess, shogi, and Go through self-play.
+- Silver, D. et al. (2018). A general reinforcement learning algorithm that masters chess, shogi, and Go through self-play.
