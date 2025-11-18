@@ -4,7 +4,6 @@ import config
 import functools
 import time
 
-@staticmethod
 def move_to_index(move):
     """
     Convert a chess.Move to an index for the policy vector.

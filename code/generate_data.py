@@ -12,6 +12,7 @@ from utils import move_to_index
 from functools import partial
 from agent import Agent
 from modelbuilder import RLModelBuilder
+from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO, format=" %(message)s")
 
@@ -24,11 +25,11 @@ def generate_game(model_path, game_id, device=None):
         states, policies, values = [], [], []
         move_count = 0
         
-        print(f"Game {game_id} starting")
+        tqdm.write(f"Game {game_id} starting")
     
         while not board.is_game_over() and move_count < config.MAX_GAME_MOVES:
             if move_count % 5 == 0:  # Log every 5 moves
-                print(f"Game {game_id}: Move {move_count}")
+                tqdm.write(f"Game {game_id}: Move {move_count}")
             agent.state = board.fen()
             try:
                 # Time the simulation step
@@ -36,7 +37,7 @@ def generate_game(model_path, game_id, device=None):
                 agent.run_simulations(config.SIMULATIONS_PER_MOVE)
                 sim_time = time.time() - sim_start
                 if sim_time > 10:  # Log if simulations take too long
-                    print(f"Game {game_id}: Simulations took {sim_time:.1f}s")
+                    tqdm.write(f"Game {game_id}: Simulations took {sim_time:.1f}s")
                 
                 # Get move probabilities from MCTS
                 actions, probs = agent.mcts.get_move_probs()
@@ -56,8 +57,8 @@ def generate_game(model_path, game_id, device=None):
                     move = np.random.choice(legal_actions, p=legal_probs)
                 else:
                     # Fallback to a random legal move if no legal moves in the MCTS results
-                    print(f"Game {game_id}: No legal moves from MCTS, using random move")
-                    move = np.random.choice(list(board.legal_moves))
+                    tqdm.write(f"Game {game_id}: No legal moves from MCTS, using random move")
+                    move = random.choice(list(board.legal_moves))
                 
                 # Store state and policy
                 states.append(board.copy())
@@ -84,7 +85,7 @@ def generate_game(model_path, game_id, device=None):
         
         # Game is over, assign values
         result = board.result()
-        print(f"Game {game_id} finished after {move_count} moves. Result: {result}")
+        tqdm.write(f"Game {game_id} finished after {move_count} moves. Result: {result}")
         
         # Calculate game outcome
         if result == '1-0':  # White win
@@ -100,7 +101,7 @@ def generate_game(model_path, game_id, device=None):
             # Flip the perspective for black's moves
             values.append(z if i % 2 == 0 else -z)
     except Exception as e:
-        print(f"Game {game_id} failed: {e}")
+        tqdm.write(f"Game {game_id} failed: {e}")
         return [], [], []
     return states, policies, values
 
@@ -150,18 +151,21 @@ def generate_selfplay_data_parallel(model_path, n_games=10, output_path=None, de
         with mp_context.Pool(num_processes) as pool:
             # Track progress with tqdm
             try:
-                from tqdm import tqdm
                 # IMPORTANT CHANGE: Pass the run_game function directly
-                results = list(tqdm(pool.imap(run_game, game_args), 
-                                   total=n_games, desc="Self-play games"))
+                results_iter = tqdm(
+                    pool.imap(run_game, game_args),
+                    total=n_games,
+                    desc="Self-play games",
+                )
             except ImportError:
-                results = pool.map(run_game, game_args)
+                results_iter = pool.imap(run_game, game_args)
         
         # Collect results
         all_states, all_policies, all_values = [], [], []
         total_positions = 0
         
-        for states, policies, values in results:
+        # Aggregate results with an additional progress bar over completed games
+        for states, policies, values in tqdm(results_iter, desc="Collecting positions", total=n_games):
             all_states.extend(states)
             all_policies.extend(policies)
             all_values.extend(values)
