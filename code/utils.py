@@ -1,19 +1,13 @@
+"""AlphaZero-style move encoding for the 4672-way policy vector."""
 import chess
 
 import config
 
+
 def move_to_index(move):
     """
-    Convert a chess.Move to an index for the policy vector.
-    
-    For AlphaZero-style encoding with 73 planes (56 queen, 8 knight, 9 underpromotion):
-    - Each source square can have up to 73 possible moves
-    - Index = source_square * 73 + move_type
-    
-    Where move_type is:
-    - 0-55: Queen moves (8 directions × 7 squares)
-    - 56-63: Knight moves (8 possible moves)
-    - 64-72: Underpromotions (3 piece types × 3 directions)
+    Map a chess.Move to `from_square * 73 + move_type`, where move_type is
+    0-55 queen-like (8 directions x 7 distances), 56-63 knight, 64-72 underpromotion.
     """
     from_square = move.from_square
     to_square = move.to_square

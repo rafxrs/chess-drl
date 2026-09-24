@@ -1,3 +1,4 @@
+"""Monte Carlo Tree Search guided by the policy/value network (PUCT selection)."""
 import chess
 import numpy as np
 import torch
@@ -17,9 +18,6 @@ class Node:
 
     def is_leaf(self):
         return len(self.children) == 0
-
-    def is_root(self):
-        return self.parent is None
 
     def expand(self, action_priors):
         for action, prob in action_priors:
@@ -45,6 +43,7 @@ class Edge:
         self.P = prior_p
 
     def get_value(self, c_puct):
+        """PUCT score: Q + U, where U favors high-prior, rarely visited moves."""
         self.child.u = c_puct * self.P * (self.parent.n_visits ** 0.5) / (1 + self.child.n_visits)
         return self.child.Q + self.child.u
 
@@ -120,16 +119,7 @@ class MCTS:
         return value.mean().item()
 
     def get_move_probs(self, temp=1.0):
-        """
-        Get the normalized visit counts for all possible moves.
-
-        Args:
-            temp: Temperature parameter controlling exploration
-
-        Returns:
-            actions: List of valid actions (chess.Move objects)
-            probs: Corresponding probabilities for each action
-        """
+        """Return (actions, probs) from root visit counts, sharpened by 1/temp."""
         actions = list(self.root.children.keys())
         visits = np.array([edge.child.n_visits for edge in self.root.children.values()], dtype=np.float64)
         visits += 1e-10  # avoid zeros
@@ -147,10 +137,3 @@ class MCTS:
             probs = np.ones_like(visits) / len(visits)
 
         return actions, probs
-
-    def update_with_move(self, last_move):
-        if last_move in self.root.children:
-            self.root = self.root.children[last_move].child
-            self.root.parent = None
-        else:
-            self.root = Node(None, 1.0)
