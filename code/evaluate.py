@@ -1,165 +1,93 @@
+# Plays two model checkpoints against each other to decide whether a newly
+# trained candidate is actually stronger than the current best model.
+import logging
 import os
 import time
-import logging
-import numpy as np
-import argparse
-import torch
 
+import chess
+import numpy as np
 from tqdm import tqdm
+
+import config
 from agent import Agent
 from env import Chess_Env
-from game import Game
 
-logging.basicConfig(level=logging.INFO, format=' %(message)s')
+logging.basicConfig(level=logging.INFO, format=" %(message)s")
+
 
 class Evaluator:
-    """
-    Class for evaluating chess models against each other.
-    """
-    def __init__(self, model_1_path: str, model_2_path: str):
-        """
-        Initialize the evaluator with two model paths.
-        
-        Args:
-            model_1_path: Path to the first model
-            model_2_path: Path to the second model
-        """
-        self.model_1_path = model_1_path
-        self.model_2_path = model_2_path
-        
-        # Check if model files exist
-        for path in [model_1_path, model_2_path]:
+    def __init__(self, candidate_path: str, reference_path: str, device=None):
+        for path in (candidate_path, reference_path):
             if not os.path.exists(path):
                 raise FileNotFoundError(f"Model file not found: {path}")
-        
-        logging.info(f"Model 1: {os.path.basename(model_1_path)}")
-        logging.info(f"Model 2: {os.path.basename(model_2_path)}")
 
-    def evaluate(self, n_games: int, verbose: bool = True, simulations_per_move: int = None):
+        self.candidate_path = candidate_path
+        self.reference_path = reference_path
+        self.device = device or config.DEVICE
+
+    def evaluate(self, n_games: int = 10, simulations_per_move: int = None, verbose: bool = True) -> dict:
         """
-        Evaluate the models by playing n_games against each other (2*n_games total games).
-        Each model plays both as white and black.
+        Play n_games total, alternating which side the candidate plays, and
+        return a stats dict describing how the candidate fared against the
+        reference model.
         """
-        score = {
-            "model_1_wins": 0,
-            "model_2_wins": 0,
-            "draws": 0,
-            "total_games": 2 * n_games
-        }
-        
-        # Create agents
-        agent_1 = Agent(model_path=self.model_1_path, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
-        agent_2 = Agent(model_path=self.model_2_path, device=torch.device("cuda" if torch.cuda.is_available() else "cpu"))
-        
-        # Set simulations per move if provided
+        candidate = Agent(model_path=self.candidate_path, device=self.device)
+        reference = Agent(model_path=self.reference_path, device=self.device)
         if simulations_per_move:
-            agent_1.mcts.n_simulations = simulations_per_move
-            agent_2.mcts.n_simulations = simulations_per_move
-        
-        start_time = time.time()
-        
-        # First round: agent_1 as white, agent_2 as black
-        if verbose:
-            logging.info(f"Playing {n_games} games with Model 1 as White...")
-        
-        for i in tqdm(range(n_games), disable=not verbose):
-            env = Chess_Env()
-            game = Game(env, agent_1, agent_2)
-            game.reset()
-            
-            # Play until game is over
-            while not game.env.is_game_over():
-                if game.env.board.turn:  # White's turn
-                    move = agent_1.get_move(game.env)
-                else:  # Black's turn
-                    move = agent_2.get_move(game.env)
-                game.env.push(move)
-            
-            # Get result
-            result = game.env.get_result()
-            if result == '1-0':
-                score["model_1_wins"] += 1
-            elif result == '0-1':
-                score["model_2_wins"] += 1
-            else:
-                score["draws"] += 1
-        
-        # Second round: agent_2 as white, agent_1 as black
-        if verbose:
-            logging.info(f"Playing {n_games} games with Model 2 as White...")
-        
-        for i in tqdm(range(n_games), disable=not verbose):
-            env = Chess_Env()
-            game = Game(env, agent_2, agent_1)
-            game.reset()
-            
-            # Play until game is over
-            while not game.env.is_game_over():
-                if game.env.board.turn:  # White's turn
-                    move = agent_2.get_move(game.env)
-                else:  # Black's turn
-                    move = agent_1.get_move(game.env)
-                game.env.push(move)
-            
-            # Get result
-            result = game.env.get_result()
-            if result == '1-0':
-                score["model_2_wins"] += 1
-            elif result == '0-1':
-                score["model_1_wins"] += 1
-            else:
-                score["draws"] += 1
-        
-        elapsed_time = time.time() - start_time
-        
-        # Calculate winning percentages
-        m1_win_pct = score["model_1_wins"] / score["total_games"] * 100
-        m2_win_pct = score["model_2_wins"] / score["total_games"] * 100
-        draws_pct = score["draws"] / score["total_games"] * 100
-        
-        # Calculate ELO difference (approximate)
-        if m1_win_pct > 0 and m2_win_pct > 0:
-            elo_diff = 400 * np.log10((m1_win_pct + 0.5 * draws_pct) / (m2_win_pct + 0.5 * draws_pct))
-        else:
-            elo_diff = 0
-            
-        # Create results summary
-        summary = (
-            f"\n{'='*50}\n"
-            f"EVALUATION RESULTS\n"
-            f"{'='*50}\n"
-            f"Model 1: {os.path.basename(self.model_1_path)}\n"
-            f"Model 2: {os.path.basename(self.model_2_path)}\n"
-            f"Total games: {score['total_games']}\n"
-            f"Time elapsed: {elapsed_time:.1f} seconds\n"
-            f"\n"
-            f"Model 1 wins: {score['model_1_wins']} ({m1_win_pct:.1f}%)\n"
-            f"Model 2 wins: {score['model_2_wins']} ({m2_win_pct:.1f}%)\n"
-            f"Draws: {score['draws']} ({draws_pct:.1f}%)\n"
-            f"\n"
-            f"Estimated ELO difference: {elo_diff:.1f} {'(Model 1 stronger)' if elo_diff > 0 else '(Model 2 stronger)'}\n"
-            f"{'='*50}"
-        )
-        
-        if verbose:
-            print(summary)
-            
-        return score, summary
+            candidate.mcts.n_simulations = simulations_per_move
+            reference.mcts.n_simulations = simulations_per_move
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate chess models against each other")
-    parser.add_argument("--model1", "--model_1", type=str, required=True, help="Path to first model")
-    parser.add_argument("--model2", "--model_2", type=str, required=True, help="Path to second model")
-    parser.add_argument("--games", "-g", type=int, default=10, help="Number of games to play")
-    parser.add_argument("--simulations", "--sims", "-s", type=int, default=None, 
-                      help="Number of MCTS simulations per move")
-    parser.add_argument("--quiet", "-q", action="store_true", help="Suppress progress output")
-    args = parser.parse_args()
-    
-    evaluator = Evaluator(args.model1, args.model2)
-    score, summary = evaluator.evaluate(args.games, verbose=not args.quiet, 
-                               simulations_per_move=args.simulations)
-    
-    # Already prints summary if verbose=True
-    if args.quiet:
-        print(summary)
+        wins = draws = losses = 0
+        start = time.time()
+
+        for game_idx in tqdm(range(n_games), disable=not verbose, desc="Evaluating"):
+            candidate_is_white = game_idx % 2 == 0
+            white, black = (candidate, reference) if candidate_is_white else (reference, candidate)
+
+            env = Chess_Env()
+            while not env.is_game_over():
+                mover = white if env.board.turn == chess.WHITE else black
+                env.push(mover.get_move(env))
+
+            result = env.get_result()
+            candidate_won = (result == "1-0") == candidate_is_white
+            reference_won = (result == "1-0") == (not candidate_is_white)
+            if result == "1/2-1/2":
+                draws += 1
+            elif candidate_won:
+                wins += 1
+            elif reference_won:
+                losses += 1
+
+        elapsed = time.time() - start
+        win_rate = wins / n_games
+        draw_rate = draws / n_games
+        loss_rate = losses / n_games
+
+        score = win_rate + 0.5 * draw_rate
+        if score >= 1.0:
+            elo_diff = 400.0
+        elif score <= 0.0:
+            elo_diff = -400.0
+        else:
+            elo_diff = 400 * np.log10(score / (1 - score))
+
+        stats = {
+            "games": n_games,
+            "wins": wins,
+            "draws": draws,
+            "losses": losses,
+            "win_rate": win_rate,
+            "draw_rate": draw_rate,
+            "loss_rate": loss_rate,
+            "elo_difference": elo_diff,
+            "elapsed_seconds": elapsed,
+        }
+
+        if verbose:
+            logging.info(
+                f"Evaluation: {wins}W/{draws}D/{losses}L over {n_games} games "
+                f"(win rate {win_rate:.1%}, Elo diff {elo_diff:+.1f}) in {elapsed:.1f}s"
+            )
+
+        return stats

@@ -26,7 +26,7 @@ build/
 *.egg-info/
 
 # Logs and training outputs
-/plots/*.png
+/logs/
 *.log
 *.fen
 error_board_game_*.fen

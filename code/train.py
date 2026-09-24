@@ -1,418 +1,210 @@
+# The one command that runs the whole self-play-and-training loop:
+# self-play with the current best model -> train a candidate on the
+# accumulated data -> evaluate the candidate against the best model ->
+# promote it if it's actually stronger -> repeat, forever, until stopped.
+import argparse
+import csv
+import logging
+import os
+import random
+from collections import deque
+from datetime import datetime
+
+import chess
+import numpy as np
 import torch
 import torch.optim as optim
-import numpy as np
-import random
-import logging
-import chess
+
 import config
-import multiprocessing as mp
-import time
-import os
-import torch.multiprocessing as torch_mp
-from generate_data import generate_selfplay_data_parallel
-from utils import move_to_index
-from functools import partial
-from collections import deque
 from agent import Agent
-from modelbuilder import RLModelBuilder
 from evaluate import Evaluator
+from model import RLModelBuilder
+from selfplay import generate_selfplay_data
 
 logging.basicConfig(level=logging.INFO, format=" %(message)s")
 
-# Use config file for all hyperparameters
-BATCH_SIZE = config.BATCH_SIZE
-REPLAY_MEMORY_SIZE = config.MAX_REPLAY_MEMORY
-N_SELFPLAY_GAMES = config.N_SELFPLAY_GAMES
-N_EPOCHS = config.N_EPOCHS
-N_SIMULATIONS = config.SIMULATIONS_PER_MOVE
-LEARNING_RATE = config.LEARNING_RATE
+REPLAY_BUFFER_PATH_NAME = "selfplay_data.npz"
 
-# Replay buffer
-replay_buffer = deque(maxlen=REPLAY_MEMORY_SIZE)
+LOG_FIELDS = [
+    "iteration", "timestamp", "new_positions", "buffer_size",
+    "loss", "policy_loss", "value_loss",
+    "eval_games", "win_rate", "elo_difference", "promoted",
+]
 
-class Trainer:
-    def __init__(self, model, device):
-        """
-        Initialize the trainer with a model and device.
-        
-        Args:
-            model: PyTorch neural network model
-            device: Device to train on (CPU/GPU)
-        """
-        self.model = model
-        self.device = device
-        self.batch_size = config.BATCH_SIZE
-    
-    def sample_batch(self, replay_buffer):
-        """Sample a random batch from the replay buffer."""
-        if self.batch_size > len(replay_buffer):
-            return list(replay_buffer)
-        else:
-            return random.sample(replay_buffer, self.batch_size)
-        
-    def train_batch(self, states, policies, values, optimizer):
-        """
-        Train the model on a single batch.
-        """
-        # Convert states to tensors
-        state_tensors = [Agent.state_to_tensor(state) for state in states]
-        states_batch = torch.cat(state_tensors).to(self.device)
 
-        # Convert policies and values to tensors
-        policies_batch = torch.FloatTensor(np.array(policies)).to(self.device)  # Fix: Use numpy.array() for efficiency
-        values_batch = torch.FloatTensor(np.array(values)).to(self.device).unsqueeze(1)  # Fix: Use numpy.array()
+def train_on_batches(model, optimizer, replay_buffer, device, n_batches, batch_size):
+    model.train()
+    losses, policy_losses, value_losses = [], [], []
 
-        # Zero gradients
+    for _ in range(n_batches):
+        batch = random.sample(replay_buffer, min(batch_size, len(replay_buffer)))
+        states, policies, values = zip(*batch)
+
+        state_tensors = torch.cat([Agent.state_to_tensor(s) for s in states]).to(device)
+        policy_targets = torch.as_tensor(np.array(policies), dtype=torch.float32, device=device)
+        value_targets = torch.as_tensor(np.array(values), dtype=torch.float32, device=device).unsqueeze(1)
+
         optimizer.zero_grad()
+        policy_logits, value_preds = model(state_tensors)
 
-        # Forward pass
-        policy_logits, value_preds = self.model(states_batch)
-
-        # Calculate losses
-        policy_loss = -(policies_batch * torch.log_softmax(policy_logits, dim=1)).sum(dim=1).mean()
-        value_loss = ((values_batch - value_preds) ** 2).mean()
-
-        # Total loss
+        policy_loss = -(policy_targets * torch.log_softmax(policy_logits, dim=1)).sum(dim=1).mean()
+        value_loss = torch.nn.functional.mse_loss(value_preds, value_targets)
         loss = policy_loss + value_loss
 
-        # Backward pass and optimize
         loss.backward()
         optimizer.step()
 
-        return {
-            'loss': loss.item(),
-            'policy_loss': policy_loss.item(),
-            'value_loss': value_loss.item()
-        }
-    
-    def train_random_batches(self, replay_buffer, optimizer, n_batches=None):
-        """
-        Train the model on random batches from the replay buffer.
-        
-        Args:
-            replay_buffer: List of (state, policy, value) tuples
-            optimizer: PyTorch optimizer
-            n_batches: Number of batches to train on (default: 2*max(5, len(replay_buffer)//batch_size))
-            
-        Returns:
-            List of loss dictionaries
-        """
-        if n_batches is None:
-            n_batches = 2 * max(5, len(replay_buffer) // self.batch_size)
-        
-        history = []
-        
-        try:
-            from tqdm import tqdm
-            batch_iter = tqdm(range(n_batches), desc="Training batches")
-        except ImportError:
-            batch_iter = range(n_batches)
-        
-        for _ in batch_iter:
-            # Sample random batch
-            batch = self.sample_batch(replay_buffer)
-            states, policies, values = zip(*batch)
-            
-            # Train on batch
-            losses = self.train_batch(states, policies, values, optimizer)
-            history.append(losses)
-        
-        return history
-    
-    def plot_loss(self, history, save_path=None):
-        """
-        Plot training loss history.
-        
-        Args:
-            history: List of loss dictionaries
-            save_path: Path to save the plot (default: config.LOSS_PLOTS_FOLDER)
-        """
-        import pandas as pd
-        import matplotlib.pyplot as plt
-        from datetime import datetime
-        
-        df = pd.DataFrame(history)
-        
-        plt.figure(figsize=(10, 6))
-        plt.plot(df['loss'], label='Total Loss')
-        plt.plot(df['policy_loss'], label='Policy Loss')
-        plt.plot(df['value_loss'], label='Value Loss')
-        plt.legend()
-        plt.title(f"Loss over time (Learning rate: {config.LEARNING_RATE})")
-        plt.xlabel('Batches')
-        plt.ylabel('Loss')
-        
-        if save_path is None:
-            save_path = os.path.join(config.LOSS_PLOTS_FOLDER, 
-                                   f"loss-{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.png")
-        
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path)
-        logging.info(f"Loss plot saved to {save_path}")
-        plt.close()
+        losses.append(loss.item())
+        policy_losses.append(policy_loss.item())
+        value_losses.append(value_loss.item())
 
-    def save_model(self, path=None):
-        """
-        Save the model to disk.
-        
-        Args:
-            path: Path to save the model (default: auto-generated with timestamp)
-        """
-        from datetime import datetime
-        
-        if path is None:
-            os.makedirs(config.MODEL_FOLDER, exist_ok=True)
-            path = os.path.join(config.MODEL_FOLDER, 
-                              f"model-{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.pt")
-        
-        torch.save(self.model.state_dict(), path)
-        logging.info(f"Model saved to {path}")
-        return path
+    return {
+        "loss": float(np.mean(losses)),
+        "policy_loss": float(np.mean(policy_losses)),
+        "value_loss": float(np.mean(value_losses)),
+    }
 
-def load_selfplay_data(data_path):
-    """Load pre-generated self-play data from a file."""
-    if not os.path.exists(data_path):
-        raise FileNotFoundError(f"Data file not found: {data_path}")
-        
-    logging.info(f"Loading data from {data_path}...")
-    data = np.load(data_path, allow_pickle=True)
-    
-    # Convert FENs back to board objects
-    states = [chess.Board(fen) for fen in data['states']]
-    policies = data['policies']
-    values = data['values']
-    
-    # Return as tuple for direct loading
-    return states, policies, values
 
-def run_gui_game(model_path):
-    """Run a game with GUI visualization."""
-    from gui.display import GUI
-    from env import Chess_Env
-    from game import Game
-    
-    env = Chess_Env()
-    white_agent = Agent(model_path=model_path)
-    black_agent = Agent(model_path=model_path)
-    game = Game(env, white_agent, black_agent)
-    
-    game.reset()
-    gui = GUI(game, player_is_white=True)
-    gui.start()
-    
-    while not game.is_over():
-        if game.current_player_is_white():
-            move = white_agent.get_move(game.env)
-        else:
-            move = black_agent.get_move(game.env)
-        game.push(move)
-        gui.draw()
-        time.sleep(0.5)  # Small delay to make moves visible
-    
-    time.sleep(5)  # Wait to show final position
+def save_replay_buffer(path, buffer):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    states = [s.fen() for s, _, _ in buffer]
+    policies = [p for _, p, _ in buffer]
+    values = [v for _, _, v in buffer]
+    np.savez_compressed(path, states=states, policies=policies, values=values)
 
-def batchify(states, device):
-    """
-    Convert a list of board states to a batch of tensors suitable for the neural network.
-    
-    Args:
-        states: List of chess.Board objects
-        device: The device (CPU/GPU) to place tensors on
-        
-    Returns:
-        torch.Tensor: Batch of state representations
-    """
-    import torch
-    batch = []
-    for state in states:
-        # Convert state to tensor format using Agent's method
-        state_tensor = Agent.state_to_tensor(state)
-        batch.append(state_tensor)
-    
-    # Concatenate all tensors into a batch
-    return torch.cat(batch).to(device)
 
-def train_network(model, states, policies, values, optimizer, device):
-    """
-    Train the neural network on a batch of examples.
-    
-    Args:
-        model: The neural network model
-        states: List of board states
-        policies: List of move probabilities (policy targets)
-        values: List of game outcomes (value targets)
-        optimizer: The optimizer
-        device: The device to use (CPU/GPU)
-    
-    Returns:
-        policy_loss, value_loss, total_loss
-    """
-    batch_start_time = time.time()
-    
-    # Convert to tensors
-    state_tensors = []
-    for state in states:
-        # Convert state to tensor format that model expects
-        s_tensor = Agent.state_to_tensor(state)
-        state_tensors.append(s_tensor)
-    
-    states_batch = torch.cat(state_tensors).to(device)
-    policies_batch = torch.FloatTensor(policies).to(device)
-    values_batch = torch.FloatTensor(values).to(device).unsqueeze(1)
-    
-    # Zero gradients
-    optimizer.zero_grad()
-    
-    # Forward pass
-    policy_logits, value_preds = model(states_batch)
-    
-    # Calculate losses
-    policy_loss = -(policies_batch * torch.log_softmax(policy_logits, dim=1)).sum(dim=1).mean()
-    value_loss = ((values_batch - value_preds) ** 2).mean()
-    
-    # Total loss
-    loss = policy_loss + value_loss
-    
-    # Backward pass and optimize
-    loss.backward()
-    optimizer.step()
-    
-    batch_time = time.time() - batch_start_time
-    
-    return policy_loss.item(), value_loss.item(), loss.item(), batch_time
+def load_replay_buffer(path, maxlen):
+    buffer = deque(maxlen=maxlen)
+    if os.path.exists(path):
+        data = np.load(path, allow_pickle=True)
+        for fen, policy, value in zip(data["states"], data["policies"], data["values"]):
+            buffer.append((chess.Board(fen), policy, value))
+        logging.info(f"Loaded {len(buffer)} positions from {path}")
+    return buffer
 
-def evaluate_model(current_model_path, previous_model_path=None, n_evaluation_games=10):
-    """Evaluate current model against previous version to measure improvement."""
-    if previous_model_path is None or not os.path.exists(previous_model_path):
-        logging.info(f"No previous model to compare against")
-        return True, 0.0  # Accept new model by default
-    
-    try:
-        logging.info(f"Evaluating current model against previous version...")
-        evaluator = Evaluator(current_model_path, previous_model_path)
-        results = evaluator.evaluate(n_games=n_evaluation_games, verbose=True)
-        
-        # Extract key metrics
-        win_rate = results.get('win_rate', 0.0)
-        draw_rate = results.get('draw_rate', 0.0)
-        loss_rate = results.get('loss_rate', 0.0)
-        elo_diff = results.get('elo_difference', 0.0)
-        
-        # Decision rule: accept if win_rate > 52% or elo_diff > 0
-        accept_new_model = win_rate > 0.52 or elo_diff > 0
-        
-        if accept_new_model:
-            logging.info(f"NEW MODEL ACCEPTED: Win rate: {win_rate:.1%}, ELO difference: {elo_diff:.1f}")
-        else:
-            logging.info(f"NEW MODEL REJECTED: Win rate: {win_rate:.1%}, ELO difference: {elo_diff:.1f}")
-        
-        return accept_new_model, elo_diff
-    
-    except Exception as e:
-        logging.error(f"Evaluation error: {e}")
-        return True, 0.0  # Accept by default in case of error
+
+def get_next_iteration(log_path):
+    rows = load_log(log_path)
+    if not rows:
+        return 1
+    return max(int(r["iteration"]) for r in rows) + 1
+
+
+def load_log(log_path):
+    if not os.path.exists(log_path):
+        return []
+    with open(log_path, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def append_log(log_path, row):
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    is_new = not os.path.exists(log_path)
+    with open(log_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=LOG_FIELDS)
+        if is_new:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def run_iteration(iteration, args, best_model_path, replay_buffer, device):
+    logging.info(f"\n===== Iteration {iteration} =====")
+
+    logging.info(f"Self-play: generating {args.games_per_iteration} games with the current best model...")
+    states, policies, values = generate_selfplay_data(
+        best_model_path, args.games_per_iteration, device=device, simulations=args.simulations
+    )
+    for example in zip(states, policies, values):
+        replay_buffer.append(example)
+    save_replay_buffer(os.path.join(config.MEMORY_DIR, REPLAY_BUFFER_PATH_NAME), replay_buffer)
+
+    if len(replay_buffer) < args.batch_size:
+        logging.info(f"Only {len(replay_buffer)} positions collected so far; need {args.batch_size} to train. Skipping training this round.")
+        return
+
+    model = RLModelBuilder(config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]).build_model(best_model_path, device)
+    optimizer = optim.Adam(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
+
+    n_batches = args.epochs_per_iteration * max(1, len(replay_buffer) // args.batch_size)
+    logging.info(f"Training on {len(replay_buffer)} positions for {n_batches} batches...")
+    train_stats = train_on_batches(model, optimizer, replay_buffer, device, n_batches, args.batch_size)
+    logging.info(
+        f"Loss: {train_stats['loss']:.4f} "
+        f"(policy {train_stats['policy_loss']:.4f}, value {train_stats['value_loss']:.4f})"
+    )
+
+    candidate_path = os.path.join(args.model_dir, f"model_iter_{iteration}.pt")
+    torch.save(model.state_dict(), candidate_path)
+
+    logging.info(f"Evaluating candidate against current best over {args.eval_games} games...")
+    eval_stats = Evaluator(candidate_path, best_model_path, device=device).evaluate(
+        n_games=args.eval_games, simulations_per_move=args.simulations
+    )
+
+    promoted = eval_stats["win_rate"] >= config.WIN_RATE_THRESHOLD
+    if promoted:
+        torch.save(model.state_dict(), best_model_path)
+        logging.info(f"New best model! Win rate {eval_stats['win_rate']:.1%} (kept as {candidate_path})")
+    else:
+        logging.info(f"Candidate rejected: win rate {eval_stats['win_rate']:.1%} < {config.WIN_RATE_THRESHOLD:.0%} threshold")
+        os.remove(candidate_path)
+
+    append_log(config.TRAINING_LOG_PATH, {
+        "iteration": iteration,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "new_positions": len(states),
+        "buffer_size": len(replay_buffer),
+        "loss": train_stats["loss"],
+        "policy_loss": train_stats["policy_loss"],
+        "value_loss": train_stats["value_loss"],
+        "eval_games": args.eval_games,
+        "win_rate": eval_stats["win_rate"],
+        "elo_difference": eval_stats["elo_difference"],
+        "promoted": promoted,
+    })
+
 
 def main():
-    # Parse arguments
-    import argparse
-    parser = argparse.ArgumentParser(description="Train chess model using reinforcement learning")
-    parser.add_argument("--model", type=str, help="Path to model for continued training")
-    parser.add_argument("--data", type=str, default="./memory/selfplay_data.npz",
-                       help="Path to pre-generated self-play data")
-    parser.add_argument("--epochs", type=int, default=N_EPOCHS, help="Number of training epochs")
-    parser.add_argument("--generate", action="store_true", 
-                       help="Generate additional data during training (default: False)")
+    parser = argparse.ArgumentParser(description="Train the chess bot through continuous self-play")
+    parser.add_argument("--iterations", type=int, default=0, help="Number of self-play/train iterations to run (0 = run forever)")
+    parser.add_argument("--games-per-iteration", type=int, default=config.N_SELFPLAY_GAMES)
+    parser.add_argument("--epochs-per-iteration", type=int, default=config.N_EPOCHS_PER_ITERATION)
+    parser.add_argument("--eval-games", type=int, default=config.EVALUATION_GAMES)
+    parser.add_argument("--simulations", type=int, default=config.SIMULATIONS_PER_MOVE)
+    parser.add_argument("--batch-size", type=int, default=config.BATCH_SIZE)
+    parser.add_argument("--model-dir", type=str, default=config.MODEL_FOLDER)
+    parser.add_argument("--fresh", action="store_true", help="Start over from a newly initialized model instead of resuming")
     args = parser.parse_args()
-    
-    # Override config if provided
-    epochs = args.epochs
-    model_path = args.model if args.model else os.path.join(config.MODEL_FOLDER, "initial_model.pt")
-    
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() and config.USE_GPU else "cpu")
+
+    os.makedirs(args.model_dir, exist_ok=True)
+    os.makedirs(config.MEMORY_DIR, exist_ok=True)
+    os.makedirs(config.LOG_DIR, exist_ok=True)
+
+    device = config.DEVICE
     logging.info(f"Using device: {device}")
-    
-    # Initialize model
-    model = RLModelBuilder(
-        config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]
-    ).build_model(model_path)
-    model.to(device)
-    
-    # Initialize optimizer
-    weight_decay = getattr(config, 'WEIGHT_DECAY', 1e-4)  # Default if not in config
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=weight_decay)
-    
-    # Initialize trainer
-    trainer = Trainer(model, device)
-    
-    # Load pre-generated data
-    if os.path.exists(args.data):
-        logging.info(f"Loading pre-generated data from {args.data}")
-        states, policies, values = load_selfplay_data(args.data)
-        
-        # Add to replay buffer
-        for s, p, v in zip(states, policies, values):
-            replay_buffer.append((s, p, v))
-        
-        logging.info(f"Loaded {len(replay_buffer)} positions into replay buffer")
-    
-    # Generate initial data if needed
-    if len(replay_buffer) < BATCH_SIZE and args.generate:
-        logging.info("Generating initial self-play data...")
-        generate_selfplay_data_parallel(model_path, n_games=N_SELFPLAY_GAMES)
-    elif len(replay_buffer) < BATCH_SIZE:
-        raise ValueError("Not enough training data and --generate not specified")
-    
-    # Training loop
-    best_model_path = model_path
-    for epoch in range(epochs):
-        epoch_start_time = time.time()
-        logging.info(f"\nEpoch {epoch+1}/{epochs}")
-        
-        # Training phase
-        model.train()
-        logging.info(f"Training on {len(replay_buffer)} positions...")
-        history = trainer.train_random_batches(replay_buffer, optimizer)
-        
-        # Plot losses
-        trainer.plot_loss(history)
-        
-        # Save current model
-        current_model_path = os.path.join(config.MODEL_FOLDER, f"model_epoch_{epoch+1}.pt")
-        torch.save(model.state_dict(), current_model_path)
-        logging.info(f"Model saved to {current_model_path}")
-        
-        # Evaluate against previous best model
-        if epoch > 0 and config.EVALUATION_GAMES > 0:
-            is_better, elo_gain = evaluate_model(
-                current_model_path, 
-                best_model_path, 
-                n_evaluation_games=config.EVALUATION_GAMES
-            )
-            
-            if is_better:
-                best_model_path = current_model_path
-                logging.info(f"New best model! ELO gain: {elo_gain:.1f}")
-        
-        # Generate new self-play data with current model (if requested)
-        if args.generate:
-            logging.info("Generating new self-play data...")
-            generate_selfplay_data_parallel(current_model_path, n_games=N_SELFPLAY_GAMES)
-        
-        # Log epoch time
-        epoch_time = time.time() - epoch_start_time
-        logging.info(f"Epoch {epoch+1} completed in {epoch_time:.1f}s")
-    
-    # Save final model
-    final_model_path = os.path.join(config.MODEL_FOLDER, "model_final.pt")
-    torch.save(model.state_dict(), final_model_path)
-    logging.info(f"\nTraining completed! Final model saved to {final_model_path}")
-    
-    # Copy the best model to the final model if we did evaluations
-    if config.EVALUATION_GAMES > 0 and best_model_path != final_model_path:
-        import shutil
-        shutil.copyfile(best_model_path, final_model_path)
-        logging.info(f"Best model from training ({os.path.basename(best_model_path)}) copied to {final_model_path}")
+
+    best_model_path = os.path.join(args.model_dir, "best.pt")
+    if args.fresh or not os.path.exists(best_model_path):
+        logging.info("Initializing a new model from scratch")
+        model = RLModelBuilder(config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]).build_model(None, device)
+        torch.save(model.state_dict(), best_model_path)
+
+    replay_buffer = load_replay_buffer(os.path.join(config.MEMORY_DIR, REPLAY_BUFFER_PATH_NAME), config.MAX_REPLAY_MEMORY)
+
+    start_iteration = get_next_iteration(config.TRAINING_LOG_PATH)
+    if start_iteration > 1:
+        logging.info(f"Resuming from iteration {start_iteration} (found existing training log)")
+
+    completed = 0
+    iteration = start_iteration - 1
+    try:
+        while args.iterations == 0 or completed < args.iterations:
+            iteration += 1
+            completed += 1
+            run_iteration(iteration, args, best_model_path, replay_buffer, device)
+    except KeyboardInterrupt:
+        logging.info("\nTraining interrupted. All progress up to the last completed iteration was saved; re-run this command to resume.")
+
 
 if __name__ == "__main__":
     main()
