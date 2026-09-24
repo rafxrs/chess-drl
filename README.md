@@ -1,133 +1,97 @@
 # Chess Deep Reinforcement Learning
 
-A self-play chess engine inspired by AlphaZero: a residual CNN with policy and
-value heads, guided by Monte Carlo Tree Search (MCTS), that learns to play
-chess purely by playing against itself.
+A chess engine that teaches itself to play, inspired by AlphaZero. It starts with no chess knowledge beyond the rules and gets stronger by playing against itself.
 
-## Overview
+## Setup
 
-`train.py` runs a continuous loop:
+Requires Python 3.9+. A CUDA GPU is optional; CPU works, just slower.
 
-1. **Self-play** — the current best model plays games against itself.
-2. **Train** — a candidate model is trained on the accumulated self-play positions.
-3. **Evaluate** — the candidate plays a match against the current best model.
-4. **Promote** — if the candidate wins often enough, it becomes the new best model.
-
-...and repeats, indefinitely, getting stronger over time. Everything else
-(playing against it, watching it learn) is a thin layer on top of that loop.
-
-## Installation
-
-```
+```bash
 git clone https://github.com/rafxrs/chess-drl.git
 cd chess-drl
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## The four commands
+Run every command from the repository root. Models, data and logs are written to `models/`, `memory/` and `logs/` there.
 
-### 1. Train
+## Usage
 
-```
-python code/train.py
-```
+| Command | What it does |
+| --- | --- |
+| `python code/train.py` | Train the bot through self-play (runs until you stop it) |
+| `python code/play.py` | Play against the bot in the terminal |
+| `python code/progress.py --watch` | Graph loss and win rate as training runs |
+| `python code/gui_play.py --model models/model_iter_5.pt` | Play a specific version of the bot on a graphical board |
 
-Starts (or resumes) the self-play/train/evaluate loop and runs it forever.
-Stop it any time with Ctrl+C — the model, replay buffer, and training log are
-all saved after each completed iteration, so re-running the same command
-picks up where it left off. Useful flags:
+**Training.** Stop at any time with Ctrl+C. Progress is saved after every iteration, so running the command again resumes where it left off. Add `--fresh` to start over, or `--iterations N` to stop after N iterations.
 
-- `--iterations N` — stop after N iterations instead of running forever.
-- `--games-per-iteration N` — self-play games generated per iteration (default from `config.py`).
-- `--eval-games N` — games played to decide whether to promote a candidate.
-- `--simulations N` — MCTS simulations per move.
-- `--fresh` — start over from a newly initialized model instead of resuming.
+**Playing.** `play.py` and `gui_play.py` use `models/best.pt` unless you pass `--model`. Both accept `--color white|black|random` and `--simulations N`, where more simulations make the bot stronger but slower. In the terminal, enter moves in UCI format (`e2e4`), or type `moves` to list the legal ones.
 
-Checkpoints are written to `models/`: `best.pt` always holds the current
-strongest model, and each promoted iteration is additionally kept as
-`model_iter_<N>.pt` so you can play against any earlier version later.
+**Progress graph.** Without a display (e.g. on a remote server), `progress.py` saves the graph to `logs/training_log.png` instead of opening a window.
 
-### 2. Play against the bot (terminal)
+## How it works
 
-```
-python code/play.py
-```
+Each iteration of `train.py`:
 
-Plays a game against `models/best.pt` in the terminal using UCI move
-notation (e.g. `e2e4`). Use `--model` to pick a different checkpoint,
-`--color white|black|random` to choose sides, and `--simulations` to trade
-off strength for speed.
+1. **Self-play:** the best model so far plays games against itself.
+2. **Train:** a candidate model learns from those games, predicting which moves were chosen (policy) and who won (value).
+3. **Evaluate:** the candidate plays a match against the current best model.
+4. **Promote:** if the candidate wins at least 55% of games, it becomes the new best.
 
-### 3. Watch it learn
+Moves are chosen with Monte Carlo Tree Search, which the network guides: the policy suggests promising moves to explore, and the value estimates who is winning without playing the game out.
 
-```
-python code/progress.py
-```
-
-Plots training loss and the win rate of each candidate against the previous
-best model, iteration by iteration. Add `--watch` to keep it refreshing
-while `train.py` runs in another terminal. When no display is available
-(e.g. a headless server) it saves the plot as a PNG next to the training log
-instead of opening a window.
-
-### 4. Play against a specific version (GUI)
-
-```
-python code/gui_play.py --model models/model_iter_5.pt
-```
-
-Opens a graphical chess board (pygame) and lets you play against whichever
-checkpoint you point it at — handy for feeling the difference between an
-early and a late version of the bot. Same `--color` and `--simulations`
-flags as `play.py`.
+Checkpoints are kept in `models/`. `best.pt` is always the strongest model, and each promoted version is also saved as `model_iter_<N>.pt`, so you can play against earlier versions.
 
 ## Configuration
 
-Key hyperparameters live in `code/config.py` and can be overridden via
-environment variables or a `.env` file, for example:
+Defaults are in `code/config.py`. Override any of them with environment variables or a `.env` file in the repository root:
 
-- `SIMULATIONS_PER_MOVE` — MCTS simulations per move (default: 100)
-- `RESIDUAL_BLOCKS` / `CONVOLUTION_FILTERS` — network size (defaults: 6 / 64,
-  intentionally small so a full iteration finishes in a reasonable time on a
-  single machine; raise these if you have serious compute)
-- `N_SELFPLAY_GAMES` — self-play games per training iteration (default: 20)
-- `EVALUATION_GAMES` — games played to evaluate each candidate (default: 10)
-- `WIN_RATE_THRESHOLD` — win rate a candidate needs to be promoted (default: 0.55)
-- `NUM_WORKERS` — parallel self-play worker processes (default: CPU count)
-- `USE_GPU` — whether to use CUDA when available (default: true)
+```bash
+SIMULATIONS_PER_MOVE=200 RESIDUAL_BLOCKS=10 python code/train.py
+```
 
-## Project structure
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SIMULATIONS_PER_MOVE` | 100 | MCTS simulations per move |
+| `RESIDUAL_BLOCKS` / `CONVOLUTION_FILTERS` | 6 / 64 | Network size |
+| `N_SELFPLAY_GAMES` | 20 | Self-play games per iteration |
+| `EVALUATION_GAMES` | 10 | Games in each candidate vs. best match |
+| `WIN_RATE_THRESHOLD` | 0.55 | Win rate needed to promote a candidate |
+| `NUM_WORKERS` | CPU count | Parallel self-play processes |
+| `USE_GPU` | true | Use CUDA when available |
+
+The defaults are deliberately small so that one iteration takes minutes on an ordinary machine. With a strong GPU, increase the network size and the number of simulations.
+
+## Project layout
 
 ```
 code/
-├── config.py        # hyperparameters and paths
-├── env.py           # chess board wrapper (Chess_Env)
-├── model.py         # residual CNN with policy/value heads
-├── mcts.py          # Monte Carlo Tree Search (Node, Edge, MCTS)
-├── agent.py         # ties the model + MCTS together to pick moves
-├── selfplay.py       # multiprocess self-play data generation
-├── evaluate.py       # plays two checkpoints against each other
-├── utils.py          # move <-> policy-index encoding
-├── train.py          # command 1: the self-play/train/evaluate loop
-├── play.py           # command 2: terminal play against the bot
-├── progress.py        # command 3: loss/win-rate graph
-├── gui_play.py        # command 4: GUI play against a specific checkpoint
-└── gui/              # pygame board rendering used by gui_play.py
+├── train.py       # command: self-play training loop
+├── play.py        # command: terminal play
+├── progress.py    # command: training graph
+├── gui_play.py    # command: graphical play
+├── config.py      # settings
+├── agent.py       # picks moves with network + MCTS
+├── mcts.py        # Monte Carlo Tree Search
+├── model.py       # residual network with policy and value heads
+├── selfplay.py    # parallel self-play game generation
+├── evaluate.py    # plays two models against each other
+├── env.py         # chess board wrapper
+├── utils.py       # move encoding for the policy output
+└── gui/           # pygame board rendering
 ```
 
-## Model architecture
-
-- **Input**: 19-plane 8x8 encoding of the position (pieces from the mover's
-  perspective, en passant, side to move, castling rights, halfmove clock)
-- **Body**: residual convolutional network with batch normalization
-- **Policy head**: logits over all 4672 possible moves (AlphaZero move encoding)
-- **Value head**: scalar in [-1, 1] predicting the game outcome
-
-## License
-
-MIT License
+Changing `RESIDUAL_BLOCKS` or `CONVOLUTION_FILTERS` makes existing checkpoints incompatible. Retrain with `--fresh`, or keep the settings that were used for training.
 
 ## References
 
-- Silver, D. et al. (2017). Mastering Chess and Shogi by Self-Play with a General Reinforcement Learning Algorithm.
-- Silver, D. et al. (2018). A general reinforcement learning algorithm that masters chess, shogi, and Go through self-play.
+- Silver et al. (2017), *Mastering Chess and Shogi by Self-Play with a General Reinforcement Learning Algorithm*
+- Silver et al. (2018), *A general reinforcement learning algorithm that masters chess, shogi, and Go through self-play*
+- [python-chess documentation](https://python-chess.readthedocs.io/en/latest/)
+- [zjeffer/chess-deep-rl](https://github.com/zjeffer/chess-deep-rl)
+
+## License
+
+MIT
