@@ -16,6 +16,23 @@ pip install -r requirements.txt
 
 Run every command from the repository root. Models, data and logs are written to `models/`, `memory/` and `logs/` there.
 
+### GPU setup (NVIDIA)
+
+On Windows, `pip install torch` installs a CPU-only build, and `train.py` then prints `Using device: cpu`. To use an NVIDIA GPU:
+
+1. Run `nvidia-smi` and note the `CUDA Version` in the top-right corner. That's the newest CUDA your driver supports.
+2. Replace PyTorch with a CUDA build no newer than that version. Get the exact command from the selector at [pytorch.org/get-started](https://pytorch.org/get-started/locally/); for example, for CUDA 12.6:
+   ```bash
+   pip uninstall -y torch
+   pip install torch --index-url https://download.pytorch.org/whl/cu126
+   ```
+3. Check that PyTorch sees the GPU:
+   ```bash
+   python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+   ```
+
+Each self-play worker loads its own copy of the model on the GPU. If you run out of GPU memory, lower `NUM_WORKERS` (for example `set NUM_WORKERS=4` on Windows).
+
 ## Usage
 
 | Command | What it does |

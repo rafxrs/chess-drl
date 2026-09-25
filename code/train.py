@@ -7,6 +7,7 @@ import csv
 import logging
 import os
 import random
+import shutil
 from collections import deque
 from datetime import datetime
 
@@ -197,6 +198,11 @@ def main():
 
     device = config.DEVICE
     logging.info(f"Using device: {device}")
+    if device.type == "cpu" and config.USE_GPU and shutil.which("nvidia-smi"):
+        logging.warning(
+            "An NVIDIA GPU was found but this PyTorch build can't use it (CPU-only install). "
+            "See 'GPU setup' in the README to install the CUDA build."
+        )
 
     best_model_path = os.path.join(args.model_dir, "best.pt")
     latest_model_path = os.path.join(args.model_dir, "latest.pt")
