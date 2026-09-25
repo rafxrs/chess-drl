@@ -28,7 +28,7 @@ REPLAY_BUFFER_PATH_NAME = "selfplay_data.npz"
 LOG_FIELDS = [
     "iteration", "timestamp", "new_positions", "buffer_size",
     "loss", "policy_loss", "value_loss",
-    "eval_games", "win_rate", "elo_difference", "promoted",
+    "eval_games", "win_rate", "score", "elo_difference", "promoted",
 ]
 
 
@@ -99,6 +99,14 @@ def load_log(log_path):
 
 def append_log(log_path, row):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    rows = load_log(log_path)
+    if rows and list(rows[0].keys()) != LOG_FIELDS:
+        # Log was written with older columns: rewrite it with the current header.
+        with open(log_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=LOG_FIELDS, restval="", extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+
     is_new = not os.path.exists(log_path)
     with open(log_path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=LOG_FIELDS)
@@ -107,7 +115,7 @@ def append_log(log_path, row):
         writer.writerow(row)
 
 
-def run_iteration(iteration, args, best_model_path, replay_buffer, device):
+def run_iteration(iteration, args, best_model_path, latest_model_path, replay_buffer, device):
     logging.info(f"\n===== Iteration {iteration} =====")
 
     logging.info(f"Self-play: generating {args.games_per_iteration} games with the current best model...")
@@ -122,10 +130,15 @@ def run_iteration(iteration, args, best_model_path, replay_buffer, device):
         logging.info(f"Only {len(replay_buffer)} positions collected so far; need {args.batch_size} to train. Skipping training this round.")
         return
 
-    model = RLModelBuilder(config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]).build_model(best_model_path, device)
+    # Keep training the same network across iterations, even when it isn't
+    # promoted; otherwise every candidate restarts from a stale best model.
+    start_path = latest_model_path if os.path.exists(latest_model_path) else best_model_path
+    model = RLModelBuilder(config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]).build_model(start_path, device)
     optimizer = optim.Adam(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
 
-    n_batches = args.epochs_per_iteration * max(1, len(replay_buffer) // args.batch_size)
+    # Scale with the new data rather than the whole buffer, so older positions
+    # aren't re-trained on over and over now that training carries over.
+    n_batches = args.epochs_per_iteration * max(1, len(states) // args.batch_size)
     logging.info(f"Training on {len(replay_buffer)} positions for {n_batches} batches...")
     train_stats = train_on_batches(model, optimizer, replay_buffer, device, n_batches, args.batch_size)
     logging.info(
@@ -133,6 +146,7 @@ def run_iteration(iteration, args, best_model_path, replay_buffer, device):
         f"(policy {train_stats['policy_loss']:.4f}, value {train_stats['value_loss']:.4f})"
     )
 
+    torch.save(model.state_dict(), latest_model_path)
     candidate_path = os.path.join(args.model_dir, f"model_iter_{iteration}.pt")
     torch.save(model.state_dict(), candidate_path)
 
@@ -141,12 +155,12 @@ def run_iteration(iteration, args, best_model_path, replay_buffer, device):
         n_games=args.eval_games, simulations_per_move=args.simulations
     )
 
-    promoted = eval_stats["win_rate"] >= config.WIN_RATE_THRESHOLD
+    promoted = eval_stats["score"] >= config.WIN_RATE_THRESHOLD
     if promoted:
         torch.save(model.state_dict(), best_model_path)
-        logging.info(f"New best model! Win rate {eval_stats['win_rate']:.1%} (kept as {candidate_path})")
+        logging.info(f"New best model! Score {eval_stats['score']:.1%} (kept as {candidate_path})")
     else:
-        logging.info(f"Candidate rejected: win rate {eval_stats['win_rate']:.1%} < {config.WIN_RATE_THRESHOLD:.0%} threshold")
+        logging.info(f"Candidate not promoted: score {eval_stats['score']:.1%} < {config.WIN_RATE_THRESHOLD:.0%} threshold")
         os.remove(candidate_path)
 
     append_log(config.TRAINING_LOG_PATH, {
@@ -159,6 +173,7 @@ def run_iteration(iteration, args, best_model_path, replay_buffer, device):
         "value_loss": train_stats["value_loss"],
         "eval_games": args.eval_games,
         "win_rate": eval_stats["win_rate"],
+        "score": eval_stats["score"],
         "elo_difference": eval_stats["elo_difference"],
         "promoted": promoted,
     })
@@ -184,10 +199,13 @@ def main():
     logging.info(f"Using device: {device}")
 
     best_model_path = os.path.join(args.model_dir, "best.pt")
+    latest_model_path = os.path.join(args.model_dir, "latest.pt")
     if args.fresh or not os.path.exists(best_model_path):
         logging.info("Initializing a new model from scratch")
         model = RLModelBuilder(config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]).build_model(None, device)
         torch.save(model.state_dict(), best_model_path)
+        if os.path.exists(latest_model_path):
+            os.remove(latest_model_path)
 
     replay_buffer = load_replay_buffer(os.path.join(config.MEMORY_DIR, REPLAY_BUFFER_PATH_NAME), config.MAX_REPLAY_MEMORY)
 
@@ -201,7 +219,7 @@ def main():
         while args.iterations == 0 or completed < args.iterations:
             iteration += 1
             completed += 1
-            run_iteration(iteration, args, best_model_path, replay_buffer, device)
+            run_iteration(iteration, args, best_model_path, latest_model_path, replay_buffer, device)
     except KeyboardInterrupt:
         logging.info("\nTraining interrupted. All progress up to the last completed iteration was saved; re-run this command to resume.")
 

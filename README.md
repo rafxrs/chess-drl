@@ -36,13 +36,13 @@ Run every command from the repository root. Models, data and logs are written to
 Each iteration of `train.py`:
 
 1. **Self-play:** the best model so far plays games against itself.
-2. **Train:** a candidate model learns from those games, predicting which moves were chosen (policy) and who won (value).
-3. **Evaluate:** the candidate plays a match against the current best model.
-4. **Promote:** if the candidate wins at least 55% of games, it becomes the new best.
+2. **Train:** the training model keeps learning from those games, predicting which moves were chosen (policy) and who won (value).
+3. **Evaluate:** it plays a match against the current best model.
+4. **Promote:** if it scores at least 55% (a draw counts as half a win), it becomes the new best and plays the next round of self-play.
 
 Moves are chosen with Monte Carlo Tree Search, which the network guides: the policy suggests promising moves to explore, and the value estimates who is winning without playing the game out.
 
-Checkpoints are kept in `models/`. `best.pt` is always the strongest model, and each promoted version is also saved as `model_iter_<N>.pt`, so you can play against earlier versions.
+Checkpoints are kept in `models/`. `best.pt` is the strongest model so far, `latest.pt` is the model still being trained, and each promoted version is also saved as `model_iter_<N>.pt`, so you can play against earlier versions.
 
 ## Configuration
 
@@ -58,7 +58,7 @@ SIMULATIONS_PER_MOVE=200 RESIDUAL_BLOCKS=10 python code/train.py
 | `RESIDUAL_BLOCKS` / `CONVOLUTION_FILTERS` | 6 / 64 | Network size |
 | `N_SELFPLAY_GAMES` | 20 | Self-play games per iteration |
 | `EVALUATION_GAMES` | 10 | Games in each candidate vs. best match |
-| `WIN_RATE_THRESHOLD` | 0.55 | Win rate needed to promote a candidate |
+| `WIN_RATE_THRESHOLD` | 0.55 | Score needed to promote a candidate (draw = half a win) |
 | `NUM_WORKERS` | CPU count | Parallel self-play processes |
 | `USE_GPU` | true | Use CUDA when available |
 

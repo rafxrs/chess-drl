@@ -50,10 +50,10 @@ WEIGHT_DECAY = 1e-4
 
 # ---------- Training loop ----------
 N_SELFPLAY_GAMES = int(os.environ.get("N_SELFPLAY_GAMES", 20))              # self-play games per iteration
-N_EPOCHS_PER_ITERATION = int(os.environ.get("N_EPOCHS_PER_ITERATION", 5))  # passes over the replay buffer
+N_EPOCHS_PER_ITERATION = int(os.environ.get("N_EPOCHS_PER_ITERATION", 5))  # training passes per new position
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 256))
 EVALUATION_GAMES = int(os.environ.get("EVALUATION_GAMES", 10))              # candidate vs. best match length
-WIN_RATE_THRESHOLD = float(os.environ.get("WIN_RATE_THRESHOLD", 0.55))      # win rate needed to promote
+WIN_RATE_THRESHOLD = float(os.environ.get("WIN_RATE_THRESHOLD", 0.55))      # score to promote (draw = half a win)
 MAX_REPLAY_MEMORY = int(os.environ.get("MAX_REPLAY_MEMORY", 200000))        # positions kept for training
 NUM_WORKERS = int(os.environ.get("NUM_WORKERS", os.cpu_count() or 1))      # parallel self-play processes
 

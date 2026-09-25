@@ -32,7 +32,8 @@ def plot(rows, save_path=None):
     loss = [float(r["loss"]) for r in rows]
     policy_loss = [float(r["policy_loss"]) for r in rows]
     value_loss = [float(r["value_loss"]) for r in rows]
-    win_rate = [float(r["win_rate"]) * 100 for r in rows]
+    # Older logs have no score column; fall back to the win rate they recorded.
+    score = [float(r.get("score") or r["win_rate"]) * 100 for r in rows]
     promoted = [r["promoted"] == "True" for r in rows]
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
@@ -46,12 +47,12 @@ def plot(rows, save_path=None):
     ax1.grid(True)
 
     colors = ["tab:green" if p else "tab:gray" for p in promoted]
-    ax2.bar(iterations, win_rate, color=colors)
+    ax2.bar(iterations, score, color=colors)
     ax2.axhline(y=config.WIN_RATE_THRESHOLD * 100, color="red", linestyle="--",
                 label=f"Promotion threshold ({config.WIN_RATE_THRESHOLD:.0%})")
-    ax2.set_ylabel("Win rate vs previous best (%)")
+    ax2.set_ylabel("Score vs previous best (%)")
     ax2.set_xlabel("Iteration")
-    ax2.set_title("Self-play learning progress (green = new best model promoted)")
+    ax2.set_title("Candidate score vs best, draws count half (green = promoted)")
     ax2.legend()
     ax2.grid(True)
 
@@ -65,7 +66,7 @@ def plot(rows, save_path=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Plot training loss and win-rate progress over time")
+    parser = argparse.ArgumentParser(description="Plot training loss and candidate score over time")
     parser.add_argument("--log", type=str, default=config.TRAINING_LOG_PATH)
     parser.add_argument("--watch", action="store_true", help="Keep refreshing the plot as training progresses")
     parser.add_argument("--interval", type=float, default=10.0, help="Seconds between refreshes in --watch mode")

@@ -78,6 +78,7 @@ class Evaluator:
             "draws": draws,
             "losses": losses,
             "win_rate": win_rate,
+            "score": score,
             "draw_rate": draw_rate,
             "loss_rate": loss_rate,
             "elo_difference": elo_diff,
@@ -87,7 +88,7 @@ class Evaluator:
         if verbose:
             logging.info(
                 f"Evaluation: {wins}W/{draws}D/{losses}L over {n_games} games "
-                f"(win rate {win_rate:.1%}, Elo diff {elo_diff:+.1f}) in {elapsed:.1f}s"
+                f"(score {score:.1%}, Elo diff {elo_diff:+.1f}) in {elapsed:.1f}s"
             )
 
         return stats
