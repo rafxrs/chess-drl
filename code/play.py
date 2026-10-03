@@ -38,9 +38,9 @@ def prompt_move(env):
 
 def main():
     parser = argparse.ArgumentParser(description="Play chess against the trained bot in the terminal")
-    parser.add_argument("--model", type=str, default=config.BEST_MODEL_PATH, help="Path to the model checkpoint to play against")
+    parser.add_argument("--model", type=str, default=config.LATEST_MODEL_PATH, help="Path to the model checkpoint to play against")
     parser.add_argument("--color", choices=["white", "black", "random"], default="random")
-    parser.add_argument("--simulations", type=int, default=config.SIMULATIONS_PER_MOVE)
+    parser.add_argument("--simulations", type=int, default=config.PLAY_SIMULATIONS, help="Search simulations per move; more is stronger but slower")
     args = parser.parse_args()
 
     human_is_white = np.random.choice([True, False]) if args.color == "random" else args.color == "white"

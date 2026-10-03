@@ -9,8 +9,11 @@ from model import RLModelBuilder
 
 
 class Agent:
-    def __init__(self, model_path, state=chess.STARTING_FEN, device=None):
-        """Load the model at `model_path` onto `device` (defaults to config.DEVICE)."""
+    def __init__(self, model_path, state=chess.STARTING_FEN, device=None, explore=False):
+        """
+        Load the model at `model_path` onto `device` (defaults to config.DEVICE).
+        `explore` adds root noise to the search, for self-play only.
+        """
         if model_path is None:
             raise ValueError("Specify the path to the model to use.")
 
@@ -19,6 +22,7 @@ class Agent:
         self.device = device if device is not None else config.DEVICE
 
         self.mcts = MCTS(self, config.__dict__)
+        self.mcts.add_noise = explore
         self.model = RLModelBuilder(
             config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]
         ).build_model(self.model_path, self.device)
@@ -37,18 +41,10 @@ class Agent:
         self.mcts.run_simulation(self.model, n)
 
     def get_move(self, env):
-        """Search the position in `env.board` and sample a move from the visit counts."""
+        """Search the position in `env.board` and return the most-visited move."""
         self.state = env.board.fen()
         self.run_simulations(self.mcts.n_simulations)
-        actions, probs = self.mcts.get_move_probs()
-
-        legal = [(a, p) for a, p in zip(actions, probs) if a in env.board.legal_moves]
-        if legal:
-            legal_actions, legal_probs = zip(*legal)
-            legal_probs = np.array(legal_probs) / sum(legal_probs)
-            return np.random.choice(legal_actions, p=legal_probs)
-
-        return np.random.choice(list(env.board.legal_moves))
+        return self.mcts.best_move()
 
     @staticmethod
     def state_to_tensor(state, add_batch=True):

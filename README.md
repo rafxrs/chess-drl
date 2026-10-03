@@ -39,27 +39,28 @@ Each self-play worker loads its own copy of the model on the GPU. If you run out
 | --- | --- |
 | `python code/train.py` | Train the bot through self-play (runs until you stop it) |
 | `python code/play.py` | Play against the bot in the terminal |
-| `python code/progress.py --watch` | Graph loss and win rate as training runs |
+| `python code/progress.py --watch` | Graph how training is going, live |
 | `python code/gui_play.py --model models/model_iter_5.pt` | Play a specific version of the bot on a graphical board |
 
-**Training.** Stop at any time with Ctrl+C. Progress is saved after every iteration, so running the command again resumes where it left off. Add `--fresh` to start over, or `--iterations N` to stop after N iterations.
+**Training.** Stop at any time with Ctrl+C. Progress is saved after every iteration, so running the command again resumes where it left off. Add `--iterations N` to stop after N iterations. `--fresh` starts over with a new model; the previous run's models, data and logs are moved to `archive/<timestamp>/`, not deleted.
 
-**Playing.** `play.py` and `gui_play.py` use `models/best.pt` unless you pass `--model`. Both accept `--color white|black|random` and `--simulations N`, where more simulations make the bot stronger but slower. In the terminal, enter moves in UCI format (`e2e4`), or type `moves` to list the legal ones.
+**Playing.** `play.py` and `gui_play.py` use `models/latest.pt` unless you pass `--model`. The bot always plays the move its search rates best. Both accept `--color white|black|random` and `--simulations N` (default 200); more simulations make the bot stronger but slower. In the terminal, enter moves in UCI format (`e2e4`), or type `moves` to list the legal ones.
 
-**Progress graph.** Without a display (e.g. on a remote server), `progress.py` saves the graph to `logs/training_log.png` instead of opening a window.
+**Progress graph.** Shows training loss, how self-play games end (white win, black win, draw) and how long they last. As the bot improves, losses fall, games are decided over the board instead of at the move limit, and game lengths change. Without a display (e.g. on a remote server), `progress.py` saves the graph to `logs/training_log.png` instead of opening a window.
 
 ## How it works
 
 Each iteration of `train.py`:
 
-1. **Self-play:** the best model so far plays games against itself.
-2. **Train:** the training model keeps learning from those games, predicting which moves were chosen (policy) and who won (value).
-3. **Evaluate:** it plays a match against the current best model.
-4. **Promote:** if it scores at least 55% (a draw counts as half a win), it becomes the new best and plays the next round of self-play.
+1. **Self-play:** the latest model plays games against itself. The first 30 plies (15 moves per side) are sampled in proportion to how much the search explored them, for variety; after that it plays its best move.
+2. **Train:** the model learns from the accumulated games, predicting which moves the search preferred (policy) and who won (value).
+3. **Repeat:** the updated model plays the next round of self-play.
+
+As in AlphaZero, there's no match between versions to decide which model to keep: the newest model always plays the next games. Games still going at the move limit (150 plies) are scored on material: the side ahead by at least 3 pawns' worth wins, otherwise it's a draw. Early on, this gives the network a learning signal before it can actually checkmate.
 
 Moves are chosen with Monte Carlo Tree Search, which the network guides: the policy suggests promising moves to explore, and the value estimates who is winning without playing the game out.
 
-Checkpoints are kept in `models/`. `best.pt` is the strongest model so far, `latest.pt` is the model still being trained, and each promoted version is also saved as `model_iter_<N>.pt`, so you can play against earlier versions.
+Checkpoints are kept in `models/`. `latest.pt` is the current model, and a copy is saved as `model_iter_<N>.pt` every 5 iterations, so you can play against earlier versions.
 
 ## Configuration
 
@@ -73,9 +74,11 @@ SIMULATIONS_PER_MOVE=200 RESIDUAL_BLOCKS=10 python code/train.py
 | --- | --- | --- |
 | `SIMULATIONS_PER_MOVE` | 100 | MCTS simulations per move |
 | `RESIDUAL_BLOCKS` / `CONVOLUTION_FILTERS` | 6 / 64 | Network size |
+| `PLAY_SIMULATIONS` | 200 | Simulations per move when you play the bot |
 | `N_SELFPLAY_GAMES` | 20 | Self-play games per iteration |
-| `EVALUATION_GAMES` | 10 | Games in each candidate vs. best match |
-| `WIN_RATE_THRESHOLD` | 0.55 | Score needed to promote a candidate (draw = half a win) |
+| `TEMPERATURE_MOVES` | 30 | Plies sampled for variety before playing the best move |
+| `MAX_GAME_MOVES` / `ADJUDICATION_MARGIN` | 150 / 3 | Ply limit for self-play games, and material lead that wins a game stopped there |
+| `CHECKPOINT_EVERY` | 5 | Iterations between saved `model_iter_<N>.pt` versions |
 | `NUM_WORKERS` | CPU count | Parallel self-play processes |
 | `USE_GPU` | true | Use CUDA when available |
 
@@ -94,7 +97,6 @@ code/
 ├── mcts.py        # Monte Carlo Tree Search
 ├── model.py       # residual network with policy and value heads
 ├── selfplay.py    # parallel self-play game generation
-├── evaluate.py    # plays two models against each other
 ├── env.py         # chess board wrapper
 ├── utils.py       # move encoding for the policy output
 └── gui/           # pygame board rendering

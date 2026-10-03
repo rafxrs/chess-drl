@@ -1,7 +1,8 @@
-# The one command that runs the whole self-play-and-training loop:
-# self-play with the current best model -> train a candidate on the
-# accumulated data -> evaluate the candidate against the best model ->
-# promote it if it's actually stronger -> repeat, forever, until stopped.
+"""
+Train the bot through continuous self-play, AlphaZero style: the latest model
+plays itself, trains on the accumulated games, and the improved model plays
+the next round. Runs until stopped; progress is saved after every iteration.
+"""
 import argparse
 import csv
 import logging
@@ -18,18 +19,17 @@ import torch.optim as optim
 
 import config
 from agent import Agent
-from evaluate import Evaluator
 from model import RLModelBuilder
 from selfplay import generate_selfplay_data
 
 logging.basicConfig(level=logging.INFO, format=" %(message)s")
 
-REPLAY_BUFFER_PATH_NAME = "selfplay_data.npz"
+REPLAY_BUFFER_PATH = os.path.join(config.MEMORY_DIR, "selfplay_data.npz")
 
 LOG_FIELDS = [
-    "iteration", "timestamp", "new_positions", "buffer_size",
+    "iteration", "timestamp", "games", "new_positions", "buffer_size",
     "loss", "policy_loss", "value_loss",
-    "eval_games", "win_rate", "score", "elo_difference", "promoted",
+    "white_wins", "black_wins", "draws", "adjudicated", "avg_plies", "checkpoint",
 ]
 
 
@@ -84,13 +84,6 @@ def load_replay_buffer(path, maxlen):
     return buffer
 
 
-def get_next_iteration(log_path):
-    rows = load_log(log_path)
-    if not rows:
-        return 1
-    return max(int(r["iteration"]) for r in rows) + 1
-
-
 def load_log(log_path):
     if not os.path.exists(log_path):
         return []
@@ -116,81 +109,86 @@ def append_log(log_path, row):
         writer.writerow(row)
 
 
-def run_iteration(iteration, args, best_model_path, latest_model_path, replay_buffer, device):
+def archive_previous_run():
+    """Move models, replay data and logs into archive/<timestamp>/ so a fresh run starts clean."""
+    target = os.path.join(config.ARCHIVE_DIR, datetime.now().strftime("%Y%m%d-%H%M%S"))
+    for folder in (config.MODEL_FOLDER, config.MEMORY_DIR, config.LOG_DIR):
+        if os.path.isdir(folder) and os.listdir(folder):
+            os.makedirs(target, exist_ok=True)
+            shutil.move(folder, os.path.join(target, os.path.basename(os.path.normpath(folder))))
+    if os.path.isdir(target):
+        logging.info(f"Moved the previous run to {target}")
+
+
+def run_iteration(iteration, args, model_path, replay_buffer, device):
     logging.info(f"\n===== Iteration {iteration} =====")
 
-    logging.info(f"Self-play: generating {args.games_per_iteration} games with the current best model...")
-    states, policies, values = generate_selfplay_data(
-        best_model_path, args.games_per_iteration, device=device, simulations=args.simulations
+    states, policies, values, games = generate_selfplay_data(
+        model_path, args.games_per_iteration, device=device, simulations=args.simulations
     )
     for example in zip(states, policies, values):
         replay_buffer.append(example)
-    save_replay_buffer(os.path.join(config.MEMORY_DIR, REPLAY_BUFFER_PATH_NAME), replay_buffer)
+    save_replay_buffer(REPLAY_BUFFER_PATH, replay_buffer)
+
+    results = [g["result"] for g in games]
+    white_wins, black_wins = results.count("1-0"), results.count("0-1")
+    draws = len(results) - white_wins - black_wins
+    adjudicated = sum(g["adjudicated"] for g in games)
+    avg_plies = float(np.mean([g["plies"] for g in games])) if games else 0.0
+    logging.info(
+        f"Results: {white_wins} white wins, {black_wins} black wins, {draws} draws "
+        f"({adjudicated} adjudicated on material), {avg_plies:.0f} plies on average"
+    )
 
     if len(replay_buffer) < args.batch_size:
-        logging.info(f"Only {len(replay_buffer)} positions collected so far; need {args.batch_size} to train. Skipping training this round.")
+        logging.info(f"Only {len(replay_buffer)} positions so far; need {args.batch_size} to train.")
         return
 
-    # Keep training the same network across iterations, even when it isn't
-    # promoted; otherwise every candidate restarts from a stale best model.
-    start_path = latest_model_path if os.path.exists(latest_model_path) else best_model_path
-    model = RLModelBuilder(config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]).build_model(start_path, device)
+    model = RLModelBuilder(config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]).build_model(model_path, device)
     optimizer = optim.Adam(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
 
-    # Scale with the new data rather than the whole buffer, so older positions
-    # aren't re-trained on over and over now that training carries over.
+    # Scale with the new data, so each position is trained on about epochs_per_iteration times.
     n_batches = args.epochs_per_iteration * max(1, len(states) // args.batch_size)
-    logging.info(f"Training on {len(replay_buffer)} positions for {n_batches} batches...")
-    train_stats = train_on_batches(model, optimizer, replay_buffer, device, n_batches, args.batch_size)
-    logging.info(
-        f"Loss: {train_stats['loss']:.4f} "
-        f"(policy {train_stats['policy_loss']:.4f}, value {train_stats['value_loss']:.4f})"
-    )
+    logging.info(f"Training for {n_batches} batches on {len(replay_buffer)} positions...")
+    stats = train_on_batches(model, optimizer, replay_buffer, device, n_batches, args.batch_size)
+    logging.info(f"Loss: {stats['loss']:.4f} (policy {stats['policy_loss']:.4f}, value {stats['value_loss']:.4f})")
 
-    torch.save(model.state_dict(), latest_model_path)
-    candidate_path = os.path.join(args.model_dir, f"model_iter_{iteration}.pt")
-    torch.save(model.state_dict(), candidate_path)
-
-    logging.info(f"Evaluating candidate against current best over {args.eval_games} games...")
-    eval_stats = Evaluator(candidate_path, best_model_path, device=device).evaluate(
-        n_games=args.eval_games, simulations_per_move=args.simulations
-    )
-
-    promoted = eval_stats["score"] >= config.WIN_RATE_THRESHOLD
-    if promoted:
-        torch.save(model.state_dict(), best_model_path)
-        logging.info(f"New best model! Score {eval_stats['score']:.1%} (kept as {candidate_path})")
-    else:
-        logging.info(f"Candidate not promoted: score {eval_stats['score']:.1%} < {config.WIN_RATE_THRESHOLD:.0%} threshold")
-        os.remove(candidate_path)
+    torch.save(model.state_dict(), model_path)
+    checkpoint = ""
+    if iteration % config.CHECKPOINT_EVERY == 0:
+        checkpoint = os.path.join(args.model_dir, f"model_iter_{iteration}.pt")
+        torch.save(model.state_dict(), checkpoint)
+        logging.info(f"Saved checkpoint {checkpoint}")
 
     append_log(config.TRAINING_LOG_PATH, {
         "iteration": iteration,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "games": len(games),
         "new_positions": len(states),
         "buffer_size": len(replay_buffer),
-        "loss": train_stats["loss"],
-        "policy_loss": train_stats["policy_loss"],
-        "value_loss": train_stats["value_loss"],
-        "eval_games": args.eval_games,
-        "win_rate": eval_stats["win_rate"],
-        "score": eval_stats["score"],
-        "elo_difference": eval_stats["elo_difference"],
-        "promoted": promoted,
+        **stats,
+        "white_wins": white_wins,
+        "black_wins": black_wins,
+        "draws": draws,
+        "adjudicated": adjudicated,
+        "avg_plies": avg_plies,
+        "checkpoint": checkpoint,
     })
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train the chess bot through continuous self-play")
-    parser.add_argument("--iterations", type=int, default=0, help="Number of self-play/train iterations to run (0 = run forever)")
+    parser.add_argument("--iterations", type=int, default=0, help="Iterations to run (0 = run until stopped)")
     parser.add_argument("--games-per-iteration", type=int, default=config.N_SELFPLAY_GAMES)
     parser.add_argument("--epochs-per-iteration", type=int, default=config.N_EPOCHS_PER_ITERATION)
-    parser.add_argument("--eval-games", type=int, default=config.EVALUATION_GAMES)
     parser.add_argument("--simulations", type=int, default=config.SIMULATIONS_PER_MOVE)
     parser.add_argument("--batch-size", type=int, default=config.BATCH_SIZE)
     parser.add_argument("--model-dir", type=str, default=config.MODEL_FOLDER)
-    parser.add_argument("--fresh", action="store_true", help="Start over from a newly initialized model instead of resuming")
+    parser.add_argument("--fresh", action="store_true", help="Archive the current run and start over from a new model")
     args = parser.parse_args()
+
+    if args.fresh:
+        archive_previous_run()
 
     os.makedirs(args.model_dir, exist_ok=True)
     os.makedirs(config.MEMORY_DIR, exist_ok=True)
@@ -204,30 +202,27 @@ def main():
             "See 'GPU setup' in the README to install the CUDA build."
         )
 
-    best_model_path = os.path.join(args.model_dir, "best.pt")
-    latest_model_path = os.path.join(args.model_dir, "latest.pt")
-    if args.fresh or not os.path.exists(best_model_path):
+    model_path = os.path.join(args.model_dir, "latest.pt")
+    if not os.path.exists(model_path):
         logging.info("Initializing a new model from scratch")
         model = RLModelBuilder(config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]).build_model(None, device)
-        torch.save(model.state_dict(), best_model_path)
-        if os.path.exists(latest_model_path):
-            os.remove(latest_model_path)
+        torch.save(model.state_dict(), model_path)
 
-    replay_buffer = load_replay_buffer(os.path.join(config.MEMORY_DIR, REPLAY_BUFFER_PATH_NAME), config.MAX_REPLAY_MEMORY)
+    replay_buffer = load_replay_buffer(REPLAY_BUFFER_PATH, config.MAX_REPLAY_MEMORY)
 
-    start_iteration = get_next_iteration(config.TRAINING_LOG_PATH)
-    if start_iteration > 1:
-        logging.info(f"Resuming from iteration {start_iteration} (found existing training log)")
+    rows = load_log(config.TRAINING_LOG_PATH)
+    iteration = max((int(r["iteration"]) for r in rows), default=0)
+    if iteration:
+        logging.info(f"Resuming after iteration {iteration}")
 
     completed = 0
-    iteration = start_iteration - 1
     try:
         while args.iterations == 0 or completed < args.iterations:
             iteration += 1
+            run_iteration(iteration, args, model_path, replay_buffer, device)
             completed += 1
-            run_iteration(iteration, args, best_model_path, latest_model_path, replay_buffer, device)
     except KeyboardInterrupt:
-        logging.info("\nTraining interrupted. All progress up to the last completed iteration was saved; re-run this command to resume.")
+        logging.info("\nStopped. Progress up to the last completed iteration is saved; run the same command to resume.")
 
 
 if __name__ == "__main__":

@@ -1,17 +1,20 @@
-# Visualize how the bot is learning: training loss and the candidate's win
-# rate against the previous best model, iteration by iteration. Can be run
-# while train.py is still going, with --watch to keep refreshing.
+"""
+Graph how training is going: loss, how self-play games end, and how long
+they last. Run it alongside train.py; --watch keeps it refreshing.
+"""
 import argparse
 import csv
 import os
+import sys
 import time
 
 import matplotlib
 
-if not os.environ.get("DISPLAY") and os.name != "nt":
-    matplotlib.use("Agg")
+if not os.environ.get("DISPLAY") and sys.platform.startswith("linux"):
+    matplotlib.use("Agg")  # no screen to draw on: save a PNG instead
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 
 import config
 
@@ -23,70 +26,87 @@ def load_log(path):
         return list(csv.DictReader(f))
 
 
-def plot(rows, save_path=None):
+def column(rows, name):
+    """Float values for a column; blank (rows from older versions) become NaN."""
+    return [float(r[name]) if r.get(name) not in (None, "") else float("nan") for r in rows]
+
+
+def plot(rows):
+    """Draw the figure; returns False if there's nothing to plot yet."""
     if not rows:
         print("No training data logged yet. Start training with train.py first.")
-        return
+        return False
 
     iterations = [int(r["iteration"]) for r in rows]
-    loss = [float(r["loss"]) for r in rows]
-    policy_loss = [float(r["policy_loss"]) for r in rows]
-    value_loss = [float(r["value_loss"]) for r in rows]
-    # Older logs have no score column; fall back to the win rate they recorded.
-    score = [float(r.get("score") or r["win_rate"]) * 100 for r in rows]
-    promoted = [r["promoted"] == "True" for r in rows]
+    games = column(rows, "games")
+    share = lambda name: [100 * x / g if g else float("nan") for x, g in zip(column(rows, name), games)]
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    fig, (ax_loss, ax_results, ax_length) = plt.subplots(3, 1, figsize=(10, 10), sharex=True)
 
-    ax1.plot(iterations, loss, label="Total loss")
-    ax1.plot(iterations, policy_loss, label="Policy loss")
-    ax1.plot(iterations, value_loss, label="Value loss")
-    ax1.set_ylabel("Loss")
-    ax1.set_title("Training loss")
-    ax1.legend()
-    ax1.grid(True)
+    ax_loss.plot(iterations, column(rows, "loss"), label="Total")
+    ax_loss.plot(iterations, column(rows, "policy_loss"), label="Policy")
+    ax_loss.plot(iterations, column(rows, "value_loss"), label="Value")
+    ax_loss.set_title("Training loss (lower is better)")
+    ax_loss.set_ylabel("Loss")
+    ax_loss.legend()
+    ax_loss.grid(True)
 
-    colors = ["tab:green" if p else "tab:gray" for p in promoted]
-    ax2.bar(iterations, score, color=colors)
-    ax2.axhline(y=config.WIN_RATE_THRESHOLD * 100, color="red", linestyle="--",
-                label=f"Promotion threshold ({config.WIN_RATE_THRESHOLD:.0%})")
-    ax2.set_ylabel("Score vs previous best (%)")
-    ax2.set_xlabel("Iteration")
-    ax2.set_title("Candidate score vs best, draws count half (green = promoted)")
-    ax2.legend()
-    ax2.grid(True)
+    ax_results.stackplot(
+        iterations, share("white_wins"), share("black_wins"), share("draws"),
+        labels=["White wins", "Black wins", "Draws"],
+        colors=["#d9d9d9", "#404040", "#8fb3d9"],
+    )
+    ax_results.plot(iterations, share("adjudicated"), color="tab:red", linestyle="--", label="Decided by move limit")
+    ax_results.set_title("How self-play games end")
+    ax_results.set_ylabel("% of games")
+    ax_results.set_ylim(0, 100)
+    ax_results.legend(loc="upper left", fontsize="small")
+    ax_results.grid(True)
+
+    ax_length.plot(iterations, column(rows, "avg_plies"), color="tab:purple")
+    ax_length.axhline(config.MAX_GAME_MOVES, color="tab:red", linestyle="--", label="Move limit")
+    ax_length.set_title("Average game length")
+    ax_length.set_ylabel("Plies")
+    ax_length.set_xlabel("Iteration")
+    ax_length.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax_length.legend()
+    ax_length.grid(True)
 
     plt.tight_layout()
-
-    if save_path:
-        plt.savefig(save_path)
-        print(f"Saved progress plot to {save_path}")
-    else:
-        plt.show()
+    return True
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Plot training loss and candidate score over time")
+    parser = argparse.ArgumentParser(description="Graph training loss and self-play results over time")
     parser.add_argument("--log", type=str, default=config.TRAINING_LOG_PATH)
     parser.add_argument("--watch", action="store_true", help="Keep refreshing the plot as training progresses")
     parser.add_argument("--interval", type=float, default=10.0, help="Seconds between refreshes in --watch mode")
-    parser.add_argument("--save", type=str, default=None, help="Save the plot to this file instead of showing it interactively")
+    parser.add_argument("--save", type=str, default=None, help="Save the plot to this file instead of showing it")
     args = parser.parse_args()
 
     headless = matplotlib.get_backend().lower() == "agg"
-    save_path = args.save or (os.path.splitext(config.TRAINING_LOG_PATH)[0] + ".png" if headless else None)
+    save_path = args.save or (os.path.splitext(args.log)[0] + ".png" if headless else None)
+
+    def render():
+        plt.close("all")
+        if plot(load_log(args.log)) and save_path:
+            plt.savefig(save_path)
+            print(f"Saved progress plot to {save_path}")
 
     if not args.watch:
-        plot(load_log(args.log), save_path=save_path)
+        render()
+        if not save_path:
+            plt.show()
         return
 
     if headless:
-        print(f"No display detected: refreshing {save_path} every {args.interval:.0f}s. Open it in an image viewer to watch it update.")
-    print("Watching for training progress... press Ctrl+C to stop.")
+        print(f"No display detected: refreshing {save_path} every {args.interval:.0f}s.")
+    else:
+        plt.ion()  # non-blocking window so the loop can redraw it
+    print("Watching training progress... press Ctrl+C to stop.")
     try:
         while True:
-            plt.close("all")
-            plot(load_log(args.log), save_path=save_path)
+            render()
             if headless:
                 time.sleep(args.interval)
             else:

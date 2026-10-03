@@ -1,8 +1,8 @@
-# Self-play data generation: the current best model plays games against
-# itself, and every position it saw becomes a (state, policy, value)
-# training example for train.py.
+"""
+Self-play: the latest model plays games against itself, and every position
+becomes a (state, policy, value) training example.
+"""
 import logging
-import random
 import time
 
 import chess
@@ -16,86 +16,94 @@ from utils import move_to_index
 
 logging.basicConfig(level=logging.INFO, format=" %(message)s")
 
+PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
 
-def play_one_game(model_path, device=None, simulations=None, max_moves=None):
-    """Play a single self-play game and return (states, policies, values) training examples."""
+
+def adjudicate(board):
+    """Score a game stopped at the move limit: the side up by ADJUDICATION_MARGIN in material wins."""
+    balance = sum(
+        value * (len(board.pieces(piece, chess.WHITE)) - len(board.pieces(piece, chess.BLACK)))
+        for piece, value in PIECE_VALUES.items()
+    )
+    if balance >= config.ADJUDICATION_MARGIN:
+        return "1-0"
+    if balance <= -config.ADJUDICATION_MARGIN:
+        return "0-1"
+    return "1/2-1/2"
+
+
+def play_one_game(model_path, device=None, simulations=None):
+    """Play one self-play game. Returns (states, policies, values, info)."""
     simulations = simulations or config.SIMULATIONS_PER_MOVE
-    max_moves = max_moves or config.MAX_GAME_MOVES
 
-    agent = Agent(model_path=model_path, device=device)
-    agent.mcts.n_simulations = simulations
+    agent = Agent(model_path=model_path, device=device, explore=True)
     board = chess.Board()
     states, policies = [], []
 
-    move_count = 0
-    while not board.is_game_over() and move_count < max_moves:
+    while not board.is_game_over() and board.ply() < config.MAX_GAME_MOVES:
         agent.state = board.fen()
         agent.run_simulations(simulations)
         actions, probs = agent.mcts.get_move_probs()
 
-        legal = [(a, p) for a, p in zip(actions, probs) if a in board.legal_moves]
-        if legal:
-            legal_actions, legal_probs = zip(*legal)
-            legal_probs = np.array(legal_probs) / sum(legal_probs)
-            move = np.random.choice(legal_actions, p=legal_probs)
-        else:
-            move = random.choice(list(board.legal_moves))
-
         policy = np.zeros(config.OUTPUT_SHAPE[0], dtype=np.float32)
         for action, prob in zip(actions, probs):
-            idx = move_to_index(action)
-            if idx < len(policy):
-                policy[idx] = prob
-
+            policy[move_to_index(action)] = prob
         states.append(board.copy())
         policies.append(policy)
 
+        # Sample early moves for variety, then play the strongest move (AlphaZero's temperature schedule).
+        if board.ply() < config.TEMPERATURE_MOVES:
+            move = actions[np.random.choice(len(actions), p=probs)]
+        else:
+            move = agent.mcts.best_move()
         board.push(move)
-        move_count += 1
 
-    result = board.result() if board.is_game_over() else "1/2-1/2"
+    adjudicated = not board.is_game_over()
+    result = adjudicate(board) if adjudicated else board.result()
     outcome = {"1-0": 1.0, "0-1": -1.0}.get(result, 0.0)
-    # states alternate whose turn it was, so flip the outcome's perspective each ply
+    # Values are from the side to move, which alternates every ply starting with White.
     values = [outcome if i % 2 == 0 else -outcome for i in range(len(states))]
 
-    return states, policies, values
+    info = {"result": result, "adjudicated": adjudicated, "plies": board.ply()}
+    return states, policies, values, info
 
 
 def _worker(args):
-    model_path, device, simulations, max_moves = args
+    model_path, device, simulations = args
     try:
-        return play_one_game(model_path, device, simulations, max_moves)
+        return play_one_game(model_path, device, simulations)
     except Exception as e:
         logging.error(f"Self-play game failed: {e}")
-        return [], [], []
+        return None
 
 
 def generate_selfplay_data(model_path, n_games, device=None, simulations=None, num_workers=None):
     """
-    Generate self-play training examples using multiple worker processes.
+    Play n_games in parallel worker processes.
 
-    Returns:
-        (states, policies, values): flat lists of training examples pooled across all games.
+    Returns (states, policies, values, game_infos): examples pooled across games,
+    plus one info dict per finished game.
     """
     num_workers = min(num_workers or config.NUM_WORKERS, n_games)
-    max_moves = config.MAX_GAME_MOVES
     start = time.time()
-
-    args = [(model_path, device, simulations, max_moves) for _ in range(n_games)]
+    args = [(model_path, device, simulations)] * n_games
 
     if num_workers <= 1:
         results = [_worker(a) for a in tqdm(args, desc="Self-play")]
     else:
-        mp_context = torch_mp.get_context("spawn")
-        with mp_context.Pool(num_workers) as pool:
+        with torch_mp.get_context("spawn").Pool(num_workers) as pool:
             results = list(tqdm(pool.imap_unordered(_worker, args), total=n_games, desc="Self-play"))
 
-    all_states, all_policies, all_values = [], [], []
-    for states, policies, values in results:
+    all_states, all_policies, all_values, infos = [], [], [], []
+    for result in results:
+        if result is None:
+            continue
+        states, policies, values, info = result
         all_states.extend(states)
         all_policies.extend(policies)
         all_values.extend(values)
+        infos.append(info)
 
     elapsed = time.time() - start
-    logging.info(f"Generated {len(all_states)} positions from {n_games} games in {elapsed:.1f}s")
-    return all_states, all_policies, all_values
+    logging.info(f"Generated {len(all_states)} positions from {len(infos)} games in {elapsed:.1f}s")
+    return all_states, all_policies, all_values, infos

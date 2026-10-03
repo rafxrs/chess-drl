@@ -25,7 +25,12 @@ SIMULATIONS_PER_MOVE = int(os.environ.get("SIMULATIONS_PER_MOVE", 100))
 C_init = 2                # exploration constant (c_puct)
 DIRICHLET_NOISE = 0.3     # alpha of the root exploration noise
 DIRICHLET_EPSILON = 0.25  # weight of that noise vs. the network prior
-MAX_GAME_MOVES = int(os.environ.get("MAX_GAME_MOVES", 150))  # self-play games are scored a draw after this
+PLAY_SIMULATIONS = int(os.environ.get("PLAY_SIMULATIONS", 200))  # used by play.py and gui_play.py
+
+# ---------- Self-play ----------
+TEMPERATURE_MOVES = int(os.environ.get("TEMPERATURE_MOVES", 30))  # plies sampled by visit count; best move after
+MAX_GAME_MOVES = int(os.environ.get("MAX_GAME_MOVES", 150))      # plies before a game is stopped and adjudicated
+ADJUDICATION_MARGIN = int(os.environ.get("ADJUDICATION_MARGIN", 3))  # material lead (pawns) that wins a stopped game
 
 # ---------- Network input: 19 planes of 8x8 ----------
 # 12 piece planes + en passant + side to move + 4 castling rights + halfmove clock
@@ -52,8 +57,7 @@ WEIGHT_DECAY = 1e-4
 N_SELFPLAY_GAMES = int(os.environ.get("N_SELFPLAY_GAMES", 20))              # self-play games per iteration
 N_EPOCHS_PER_ITERATION = int(os.environ.get("N_EPOCHS_PER_ITERATION", 5))  # training passes per new position
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", 256))
-EVALUATION_GAMES = int(os.environ.get("EVALUATION_GAMES", 10))              # candidate vs. best match length
-WIN_RATE_THRESHOLD = float(os.environ.get("WIN_RATE_THRESHOLD", 0.55))      # score to promote (draw = half a win)
+CHECKPOINT_EVERY = int(os.environ.get("CHECKPOINT_EVERY", 5))               # keep a model_iter_<N>.pt every N iterations
 MAX_REPLAY_MEMORY = int(os.environ.get("MAX_REPLAY_MEMORY", 200000))        # positions kept for training
 NUM_WORKERS = int(os.environ.get("NUM_WORKERS", os.cpu_count() or 1))      # parallel self-play processes
 
@@ -61,5 +65,6 @@ NUM_WORKERS = int(os.environ.get("NUM_WORKERS", os.cpu_count() or 1))      # par
 MODEL_FOLDER = os.environ.get("MODEL_FOLDER", "./models")
 MEMORY_DIR = os.environ.get("MEMORY_FOLDER", "./memory")
 LOG_DIR = os.environ.get("LOG_FOLDER", "./logs")
-BEST_MODEL_PATH = os.path.join(MODEL_FOLDER, "best.pt")
+LATEST_MODEL_PATH = os.path.join(MODEL_FOLDER, "latest.pt")
+ARCHIVE_DIR = os.environ.get("ARCHIVE_FOLDER", "./archive")
 TRAINING_LOG_PATH = os.path.join(LOG_DIR, "training_log.csv")

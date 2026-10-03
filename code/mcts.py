@@ -50,6 +50,7 @@ class MCTS:
         self.n_simulations = config_dict.get("SIMULATIONS_PER_MOVE", config.SIMULATIONS_PER_MOVE)
         self.dirichlet_alpha = config_dict.get("DIRICHLET_NOISE", config.DIRICHLET_NOISE)
         self.dirichlet_epsilon = config_dict.get("DIRICHLET_EPSILON", config.DIRICHLET_EPSILON)
+        self.add_noise = False  # root Dirichlet noise; only wanted for self-play exploration
         self.root = Node(None, 1.0)
 
     def run_simulation(self, model, n=None):
@@ -84,7 +85,7 @@ class MCTS:
 
             action_priors = [(move, policy[move_to_index(move)]) for move in legal_moves if move_to_index(move) < len(policy)]
 
-            if node is self.root and action_priors:
+            if self.add_noise and node is self.root and action_priors:
                 noise = np.random.dirichlet([self.dirichlet_alpha] * len(action_priors))
                 epsilon = self.dirichlet_epsilon
                 action_priors = [(move, (1 - epsilon) * p + epsilon * eta) for (move, p), eta in zip(action_priors, noise)]
@@ -113,6 +114,10 @@ class MCTS:
         with torch.no_grad():
             _, value = model(state_tensor)
         return value.mean().item()
+
+    def best_move(self):
+        """The root move with the most visits."""
+        return max(self.root.children.items(), key=lambda kv: kv[1].child.n_visits)[0]
 
     def get_move_probs(self, temp=1.0):
         """Return (actions, probs) from root visit counts, sharpened by 1/temp."""

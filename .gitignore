@@ -27,6 +27,7 @@ build/
 
 # Logs and training outputs
 /logs/
+/archive/
 *.log
 *.fen
 error_board_game_*.fen

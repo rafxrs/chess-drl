@@ -19,9 +19,9 @@ WINDOW_SIZE = 800
 
 def main():
     parser = argparse.ArgumentParser(description="Play chess against a specific bot checkpoint, with a graphical board")
-    parser.add_argument("--model", type=str, default=config.BEST_MODEL_PATH, help="Path to the model checkpoint to play against")
+    parser.add_argument("--model", type=str, default=config.LATEST_MODEL_PATH, help="Path to the model checkpoint to play against")
     parser.add_argument("--color", choices=["white", "black", "random"], default="random")
-    parser.add_argument("--simulations", type=int, default=config.SIMULATIONS_PER_MOVE)
+    parser.add_argument("--simulations", type=int, default=config.PLAY_SIMULATIONS, help="Search simulations per move; more is stronger but slower")
     args = parser.parse_args()
 
     human_is_white = np.random.choice([True, False]) if args.color == "random" else args.color == "white"
