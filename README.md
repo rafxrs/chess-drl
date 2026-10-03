@@ -46,7 +46,7 @@ Each self-play worker loads its own copy of the model on the GPU. If you run out
 
 **Playing.** `play.py` and `gui_play.py` use `models/latest.pt` unless you pass `--model`. The bot always plays the move its search rates best. Both accept `--color white|black|random` and `--simulations N` (default 200); more simulations make the bot stronger but slower. In the terminal, enter moves in UCI format (`e2e4`), or type `moves` to list the legal ones.
 
-**Progress graph.** Shows training loss, how self-play games end (white win, black win, draw) and how long they last. As the bot improves, losses fall, games are decided over the board instead of at the move limit, and game lengths change. Without a display (e.g. on a remote server), `progress.py` saves the graph to `logs/training_log.png` instead of opening a window.
+**Progress graph.** The top panel shows the bot's score in benchmark matches, run every 10 iterations against a random mover and against its own checkpoint from 10 iterations earlier. Scoring above 50% against the earlier checkpoint means it's still getting stronger. Below that are training loss, how self-play games end (white win, black win, draw) and how long they last. Without a display (e.g. on a remote server), `progress.py` saves the graph to `logs/training_log.png` instead of opening a window.
 
 ## How it works
 
@@ -55,6 +55,8 @@ Each iteration of `train.py`:
 1. **Self-play:** the latest model plays games against itself. The first 30 plies (15 moves per side) are sampled in proportion to how much the search explored them, for variety; after that it plays its best move.
 2. **Train:** the model learns from the accumulated games, predicting which moves the search preferred (policy) and who won (value).
 3. **Repeat:** the updated model plays the next round of self-play.
+
+Training uses the most recent 50,000 positions (about 20 iterations of games), so the network learns from games near its current level. The learning rate drops tenfold at iterations 100 and 300. Every 10 iterations, a short benchmark measures playing strength (see the progress graph).
 
 As in AlphaZero, there's no match between versions to decide which model to keep: the newest model always plays the next games. Games still going at the move limit (150 plies) are scored on material: the side ahead by at least 3 pawns' worth wins, otherwise it's a draw. Early on, this gives the network a learning signal before it can actually checkmate.
 
@@ -79,6 +81,9 @@ SIMULATIONS_PER_MOVE=200 RESIDUAL_BLOCKS=10 python code/train.py
 | `TEMPERATURE_MOVES` | 30 | Plies sampled for variety before playing the best move |
 | `MAX_GAME_MOVES` / `ADJUDICATION_MARGIN` | 150 / 3 | Ply limit for self-play games, and material lead that wins a game stopped there |
 | `CHECKPOINT_EVERY` | 5 | Iterations between saved `model_iter_<N>.pt` versions |
+| `MAX_REPLAY_MEMORY` | 50000 | Most recent positions kept for training |
+| `LR_MILESTONES` | 100,300 | Iterations where the learning rate drops tenfold |
+| `BENCHMARK_EVERY` / `BENCHMARK_GAMES` | 10 / 10 | How often to benchmark, and games per opponent (0 turns it off) |
 | `NUM_WORKERS` | CPU count | Parallel self-play processes |
 | `USE_GPU` | true | Use CUDA when available |
 
@@ -97,6 +102,7 @@ code/
 ├── mcts.py        # Monte Carlo Tree Search
 ├── model.py       # residual network with policy and value heads
 ├── selfplay.py    # parallel self-play game generation
+├── benchmark.py   # strength matches vs a random mover and older checkpoints
 ├── env.py         # chess board wrapper
 ├── utils.py       # move encoding for the policy output
 └── gui/           # pygame board rendering

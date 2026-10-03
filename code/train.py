@@ -7,7 +7,9 @@ import argparse
 import csv
 import logging
 import os
+import glob
 import random
+import re
 import shutil
 from collections import deque
 from datetime import datetime
@@ -19,6 +21,7 @@ import torch.optim as optim
 
 import config
 from agent import Agent
+from benchmark import benchmark
 from model import RLModelBuilder
 from selfplay import generate_selfplay_data
 
@@ -30,7 +33,26 @@ LOG_FIELDS = [
     "iteration", "timestamp", "games", "new_positions", "buffer_size",
     "loss", "policy_loss", "value_loss",
     "white_wins", "black_wins", "draws", "adjudicated", "avg_plies", "checkpoint",
+    "learning_rate", "vs_random", "vs_checkpoint", "vs_checkpoint_iter",
 ]
+
+
+def learning_rate(iteration):
+    """LEARNING_RATE, divided by 10 at each milestone already reached."""
+    return config.LEARNING_RATE * 0.1 ** sum(iteration >= m for m in config.LR_MILESTONES)
+
+
+def earlier_checkpoint(model_dir, max_iteration):
+    """Path and iteration of the newest model_iter_<N>.pt with N <= max_iteration, or (None, None)."""
+    found = []
+    for path in glob.glob(os.path.join(model_dir, "model_iter_*.pt")):
+        match = re.search(r"model_iter_(\d+)\.pt$", path)
+        if match and int(match.group(1)) <= max_iteration:
+            found.append((int(match.group(1)), path))
+    if not found:
+        return None, None
+    n, path = max(found)
+    return path, n
 
 
 def train_on_batches(model, optimizer, replay_buffer, device, n_batches, batch_size):
@@ -145,20 +167,47 @@ def run_iteration(iteration, args, model_path, replay_buffer, device):
         return
 
     model = RLModelBuilder(config.INPUT_SHAPE, config.OUTPUT_SHAPE[0], config.OUTPUT_SHAPE[1]).build_model(model_path, device)
-    optimizer = optim.Adam(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
+    lr = learning_rate(iteration)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=config.WEIGHT_DECAY)
+    # Keep Adam's running statistics across iterations instead of restarting them every time.
+    optimizer_path = os.path.join(args.model_dir, "optimizer.pt")
+    if os.path.exists(optimizer_path):
+        try:
+            optimizer.load_state_dict(torch.load(optimizer_path, map_location=device))
+        except (ValueError, RuntimeError):
+            logging.warning("Saved optimizer state doesn't match the model; starting it fresh.")
+    for group in optimizer.param_groups:
+        group["lr"] = lr
 
     # Scale with the new data, so each position is trained on about epochs_per_iteration times.
     n_batches = args.epochs_per_iteration * max(1, len(states) // args.batch_size)
     logging.info(f"Training for {n_batches} batches on {len(replay_buffer)} positions...")
     stats = train_on_batches(model, optimizer, replay_buffer, device, n_batches, args.batch_size)
-    logging.info(f"Loss: {stats['loss']:.4f} (policy {stats['policy_loss']:.4f}, value {stats['value_loss']:.4f})")
+    logging.info(
+        f"Loss: {stats['loss']:.4f} (policy {stats['policy_loss']:.4f}, value {stats['value_loss']:.4f}), "
+        f"learning rate {lr:g}"
+    )
 
     torch.save(model.state_dict(), model_path)
+    torch.save(optimizer.state_dict(), optimizer_path)
     checkpoint = ""
     if iteration % config.CHECKPOINT_EVERY == 0:
         checkpoint = os.path.join(args.model_dir, f"model_iter_{iteration}.pt")
         torch.save(model.state_dict(), checkpoint)
         logging.info(f"Saved checkpoint {checkpoint}")
+
+    vs_random = vs_checkpoint = vs_checkpoint_iter = ""
+    if config.BENCHMARK_EVERY and iteration % config.BENCHMARK_EVERY == 0:
+        n = config.BENCHMARK_GAMES
+        logging.info(f"Benchmark: {n} games against a random mover...")
+        vs_random = benchmark(model_path, None, n, device=device, simulations=args.simulations)
+        message = f"Benchmark score: {vs_random:.0%} vs random"
+        opponent, vs_checkpoint_iter = earlier_checkpoint(args.model_dir, iteration - config.BENCHMARK_EVERY)
+        if opponent:
+            logging.info(f"Benchmark: {n} games against iteration {vs_checkpoint_iter}...")
+            vs_checkpoint = benchmark(model_path, opponent, n, device=device, simulations=args.simulations)
+            message += f", {vs_checkpoint:.0%} vs iteration {vs_checkpoint_iter}"
+        logging.info(message + " (a draw counts as half)")
 
     append_log(config.TRAINING_LOG_PATH, {
         "iteration": iteration,
@@ -173,6 +222,10 @@ def run_iteration(iteration, args, model_path, replay_buffer, device):
         "adjudicated": adjudicated,
         "avg_plies": avg_plies,
         "checkpoint": checkpoint,
+        "learning_rate": lr,
+        "vs_random": vs_random,
+        "vs_checkpoint": vs_checkpoint,
+        "vs_checkpoint_iter": "" if vs_checkpoint_iter is None else vs_checkpoint_iter,
     })
 
 

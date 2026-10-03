@@ -1,6 +1,6 @@
 """
-Graph how training is going: loss, how self-play games end, and how long
-they last. Run it alongside train.py; --watch keeps it refreshing.
+Graph how training is going: benchmark scores, loss, how self-play games
+end, and how long they last. Run it alongside train.py; --watch keeps it refreshing.
 """
 import argparse
 import csv
@@ -41,7 +41,23 @@ def plot(rows):
     games = column(rows, "games")
     share = lambda name: [100 * x / g if g else float("nan") for x, g in zip(column(rows, name), games)]
 
-    fig, (ax_loss, ax_results, ax_length) = plt.subplots(3, 1, figsize=(10, 10), sharex=True)
+    fig, (ax_strength, ax_loss, ax_results, ax_length) = plt.subplots(4, 1, figsize=(10, 13), sharex=True)
+
+    for name, label, color in (("vs_random", "vs random mover", "tab:green"),
+                               ("vs_checkpoint", f"vs checkpoint from {config.BENCHMARK_EVERY} iterations earlier", "tab:blue")):
+        points = [(i, 100 * v) for i, v in zip(iterations, column(rows, name)) if v == v]  # skip NaN
+        if points:
+            ax_strength.plot(*zip(*points), "o-", color=color, label=label)
+    ax_strength.axhline(50, color="gray", linestyle="--", linewidth=1)
+    ax_strength.set_title("Strength benchmark (above 50% = winning; a draw counts as half)")
+    ax_strength.set_ylabel("Score %")
+    ax_strength.set_ylim(0, 100)
+    ax_strength.grid(True)
+    if ax_strength.get_legend_handles_labels()[0]:
+        ax_strength.legend(loc="lower right", fontsize="small")
+    else:
+        ax_strength.text(0.5, 0.5, f"First benchmark runs at iteration {config.BENCHMARK_EVERY}", transform=ax_strength.transAxes,
+                         ha="center", va="center", color="gray")
 
     ax_loss.plot(iterations, column(rows, "loss"), label="Total")
     ax_loss.plot(iterations, column(rows, "policy_loss"), label="Policy")
