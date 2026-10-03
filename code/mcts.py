@@ -29,11 +29,6 @@ class Node:
         self.n_visits += 1
         self.Q += (leaf_value - self.Q) / self.n_visits
 
-    def update_recursive(self, leaf_value):
-        if self.parent:
-            self.parent.update_recursive(-leaf_value)
-        self.update(leaf_value)
-
 
 class Edge:
     def __init__(self, move, parent, child, prior_p):
@@ -96,22 +91,23 @@ class MCTS:
 
             node.expand(action_priors)
 
-        # Evaluation
+        # Evaluation: value of the leaf for the side to move there.
         value = self.evaluate_state(state, model)
 
-        # Backpropagation
+        # Backpropagation: each node's Q is from the perspective of the player
+        # who moved into it, so flip the sign before every update.
         for path_node in reversed(search_path):
-            path_node.update_recursive(value)
             value = -value
+            path_node.update(value)
 
     def evaluate_state(self, state, model):
+        """Value in [-1, 1] for the side to move in `state`."""
         if state.is_game_over():
             result = state.result()
-            if result == "1-0":
-                return 1
-            elif result == "0-1":
-                return -1
-            return 0
+            if result == "1/2-1/2":
+                return 0
+            white_won = result == "1-0"
+            return 1 if white_won == (state.turn == chess.WHITE) else -1
 
         state_tensor = self.agent.state_to_tensor(state).to(self.agent.device)
         with torch.no_grad():
